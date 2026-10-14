@@ -68,9 +68,17 @@ export function getTextFromObject(obj, preserveUrls = false) {
   return '';
 }
 
+export function normalizeThumbnailUrl(url) {
+  if (!url) return '';
+  if (url.startsWith('//')) return 'https:' + url;
+  return url;
+}
+
 export function parseSuccinctVideo(renderer) {
   if (!renderer) return null;
   const videoId = renderer.videoId || '';
+  const thumbs = renderer.thumbnail?.thumbnails || [];
+  const rawThumb = thumbs.length ? (thumbs[thumbs.length - 1].url || '') : (videoId ? getVideoThumbnailUrl(videoId) : '');
   return {
     type: 'video',
     videoId,
@@ -80,20 +88,22 @@ export function parseSuccinctVideo(renderer) {
     publishDate: getTextFromObject(renderer.publishedTimeText) || '',
     views: getTextFromObject(renderer.shortViewCountText) || '',
     author: getTextFromObject(renderer.shortBylineText) || '',
-    thumbnailUrl: videoId ? getVideoThumbnailUrl(videoId) : '',
+    thumbnailUrl: normalizeThumbnailUrl(rawThumb),
   };
 }
 
 export function parseSuccinctChannel(renderer) {
   if (!renderer) return null;
   const id = renderer?.navigationEndpoint?.browseEndpoint?.browseId || '';
+  const thumbs = renderer?.thumbnail?.thumbnails || [];
+  const rawIcon = thumbs.length ? (thumbs[thumbs.length - 1].url || '') : getThumbnailUrlClosest(thumbs, 176);
   return {
     type: 'channel',
     id,
     name: getTextFromObject(renderer.displayName) || getTextFromObject(renderer.title) || '',
     subscribers: getTextFromObject(renderer.subscriberCountText) || '',
     videoCount: getTextFromObject(renderer.videoCountText) || '',
-    iconUrl: getThumbnailUrlClosest(renderer?.thumbnail?.thumbnails, 70),
+    iconUrl: normalizeThumbnailUrl(rawIcon),
   };
 }
 
@@ -101,11 +111,9 @@ export function parseSuccinctPlaylist(renderer) {
   if (!renderer) return null;
 
   let thumbnailUrl = '';
-  const thumbnails = renderer?.thumbnail?.thumbnails || [];
-  for (const thumb of thumbnails) {
-    if (thumb.url && thumb.url.includes('/default.jpg')) {
-      thumbnailUrl = thumb.url;
-    }
+  const thumbnails = renderer?.thumbnail?.thumbnails || renderer?.thumbnailRenderer?.playlistVideoThumbnailRenderer?.thumbnail?.thumbnails || [];
+  if (thumbnails.length) {
+    thumbnailUrl = normalizeThumbnailUrl(thumbnails[thumbnails.length - 1].url || '');
   }
 
   let url = convertUrlToMobile(renderer?.shareUrl || '');
@@ -140,7 +148,7 @@ export function getPlaylistIdByUrl(url) {
 }
 
 export function getVideoThumbnailUrl(id) {
-  return `https://i.ytimg.com/vi/${id}/mqdefault.jpg`;
+  return `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
 }
 
 export function getVideoUrlById(id) {

@@ -16,8 +16,10 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-import { proxyImageUrl } from '../api.js';
+
+import { proxyImageUrl, getPlaylist } from '../api.js';
 import { escapeHtml } from '../router.js';
+import { getPlaylists, removeVideoFromPlaylist } from '../playlistManager.js';
 
 export async function renderPlaylist(app, params) {
   const listId = params.list;
@@ -29,14 +31,30 @@ export async function renderPlaylist(app, params) {
   app.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
 
   let data;
-  try {
-    const res = await fetch(`/api/v1/playlists/${listId}`);
-    data = await res.json();
-    document.title = data.title ? `${data.title} - Vivid` : 'Playlist - Vivid';
+  const isLocal = listId.startsWith('pl_');
 
-  } catch(e) {
-    app.innerHTML = `<div class="error-msg">${escapeHtml(e.message)}</div>`;
-    return;
+  if (isLocal) {
+    const playlists = getPlaylists();
+    const found = playlists.find(p => p.id === listId);
+    if (!found) {
+      app.innerHTML = '<div class="error-msg">Playlist not found</div>';
+      return;
+    }
+    data = {
+      id: found.id,
+      title: found.name,
+      authorName: 'My Playlists',
+      videoCount: found.videos?.length || 0,
+      videos: found.videos || [],
+    };
+  } else {
+    try {
+      data = await getPlaylist(listId);
+      document.title = data.title ? `${data.title} - Vivid` : 'Playlist - Vivid';
+    } catch(e) {
+      app.innerHTML = `<div class="error-msg">${escapeHtml(e.message)}</div>`;
+      return;
+    }
   }
 
   if (data.error) {
@@ -44,6 +62,7 @@ export async function renderPlaylist(app, params) {
     return;
   }
 
+  document.title = data.title ? `${data.title} - Vivid` : 'Playlist - Vivid';
   const videos = data.videos || [];
   const firstVideo = videos[0];
 
@@ -62,12 +81,12 @@ export async function renderPlaylist(app, params) {
           <div class="playlist-cover-overlay"></div>
         </div>
         <div class="playlist-hero-info">
-          <div class="playlist-label">Playlist</div>
+          <div class="playlist-label">${isLocal ? 'User Playlist' : 'Playlist'}</div>
           <h1 class="playlist-title">${escapeHtml(data.title || 'Playlist')}</h1>
           ${data.authorName ? `<div class="playlist-author">${escapeHtml(data.authorName)}</div>` : ''}
           <div class="playlist-meta">
-            ${data.videoCount ? `<span>${data.videoCount} videos</span>` : ''}
-            ${data.viewCount ? `<span>${escapeHtml(data.viewCount)} views</span>` : ''}
+            ${videos.length ? `<span>${videos.length} videos</span>` : ''}
+            ${data.viewCount ? `<span>${escapeHtml(data.viewCount)}</span>` : ''}
           </div>
           ${firstVideo ? `
             <a href="#/watch?v=${firstVideo.videoId || firstVideo.id}&list=${listId}" class="playlist-play-btn">
@@ -79,26 +98,46 @@ export async function renderPlaylist(app, params) {
       </div>
 
       <div class="playlist-track-list">
-        ${videos.map((v, i) => renderPlaylistTrack(v, i, listId)).join('')}
+        ${videos.map((v, i) => renderPlaylistTrack(v, i, listId, isLocal)).join('')}
         ${videos.length === 0 ? '<p style="color:var(--text-muted);padding:2rem;text-align:center;">No videos in this playlist</p>' : ''}
       </div>
     </div>
   `;
+
+  if (isLocal) {
+    app.querySelectorAll('.remove-track-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const vidId = btn.dataset.vid;
+        removeVideoFromPlaylist(listId, vidId);
+        renderPlaylist(app, params);
+      });
+    });
+  }
 }
-function renderPlaylistTrack(v, i, listId) {
+
+function renderPlaylistTrack(v, i, listId, isLocal) {
   const videoId = v.videoId || v.id;
   if (!videoId) return '';
   return `
-    <a href="#/watch?v=${videoId}&list=${listId}" class="playlist-track">
-      <span class="playlist-track-num">${i + 1}</span>
-      <div class="playlist-track-thumb">
-        <img src="${proxyImageUrl(v.thumbnailUrl || '')}" alt="" loading="lazy">
-        ${v.duration ? `<span class="video-card-duration">${escapeHtml(v.duration)}</span>` : ''}
-      </div>
-      <div class="playlist-track-info">
-        <div class="playlist-track-title">${escapeHtml(v.title || '')}</div>
-        <div class="playlist-track-meta">${escapeHtml(v.author || v.authorName || '')}</div>
-      </div>
-    </a>
+    <div style="display:flex; align-items:center; gap:8px;">
+      <a href="#/watch?v=${videoId}&list=${listId}" class="playlist-track" style="flex:1;">
+        <span class="playlist-track-num">${i + 1}</span>
+        <div class="playlist-track-thumb">
+          <img src="${proxyImageUrl(v.thumbnailUrl || '')}" alt="" loading="lazy">
+          ${v.duration ? `<span class="video-card-duration">${escapeHtml(v.duration)}</span>` : ''}
+        </div>
+        <div class="playlist-track-info">
+          <div class="playlist-track-title">${escapeHtml(v.title || '')}</div>
+          <div class="playlist-track-meta">${escapeHtml(v.author || v.authorName || '')}</div>
+        </div>
+      </a>
+      ${isLocal ? `
+        <button class="remove-track-btn" data-vid="${videoId}" title="Remove video" style="background:none;border:none;color:var(--text-muted);padding:8px;cursor:pointer;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      ` : ''}
+    </div>
   `;
 }

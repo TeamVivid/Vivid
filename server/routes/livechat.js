@@ -23,14 +23,17 @@ const router = express.Router();
 const client = new InnerTubeClient();
 
 router.get('/:videoId', async (req, res) => {
-  const { continuation } = req.query;
+  const { continuation, replay, offset } = req.query;
 
   if (!continuation) {
     return res.status(400).json({ error: 'Continuation token required' });
   }
 
   try {
-    const result = await livechat.getLiveChat(client, continuation);
+    const result = await livechat.getLiveChat(client, continuation, {
+      replay: replay === '1',
+      offsetMs: Number(offset) || 0,
+    });
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });

@@ -16,8 +16,9 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-import { getChannel, getChannelContinuation, getChannelCommunity, getChannelPlaylists, proxyImageUrl } from '../api.js';
+import { getChannel, getChannelContinuation, getChannelCommunity, getChannelPlaylists, proxyImageUrl, syncAccount } from '../api.js';
 import { escapeHtml } from '../router.js';
+import { getPlaylists } from '../playlistManager.js';
 import { videoCard } from './home.js';
 
 export async function renderChannel(app, params) {
@@ -206,6 +207,29 @@ export async function renderChannel(app, params) {
         else loadMoreBtn.textContent = 'Load more';
       } catch (e) {
         loadMoreBtn.textContent = 'Error, retry';
+      }
+    });
+  }
+
+  const subBtn = document.getElementById('sub-btn');
+  if (subBtn) {
+    subBtn.addEventListener('click', async () => {
+      let subs = JSON.parse(localStorage.getItem('vivid_subs') || '[]');
+      if (subs.includes(channelId)) {
+        subs = subs.filter(id => id !== channelId);
+        subBtn.textContent = 'Subscribe';
+        subBtn.style.background = '#e50914';
+      } else {
+        subs.push(channelId);
+        subBtn.textContent = 'Unsubscribe';
+        subBtn.style.background = 'var(--bg-tertiary)';
+      }
+      localStorage.setItem('vivid_subs', JSON.stringify(subs));
+      const token = localStorage.getItem('vivid_auth_token');
+      if (token) {
+        try {
+          await syncAccount(token, { subscriptions: subs, playlists: getPlaylists() });
+        } catch {}
       }
     });
   }

@@ -17,8 +17,28 @@
  */
 
 import fetch from 'node-fetch';
-import { MWEB, ANDROID, ANDROID_REEL, VISIONOS, WEB, getInnertubeApiUrl, API_URL, MOBILE_API_URL, DEFAULT_LANG, DEFAULT_COUNTRY, LANG_TO_COUNTRY } from './constants.js';
+import { MWEB, ANDROID, ANDROID_REEL, VISIONOS, ANDROID_VR, WEB, getInnertubeApiUrl, API_URL, MOBILE_API_URL, DEFAULT_LANG, DEFAULT_COUNTRY, LANG_TO_COUNTRY } from './constants.js';
 import { getProxyAgent } from './proxyManager.js';
+import { getVrAuthorization, hasOAuthFile } from './androidVrAuth.js';
+
+async function fetchWith403Retry(url, fetchArgs, maxRetries = 3) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, fetchArgs);
+      if (res.status === 403 && attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 400 * Math.pow(2, attempt)));
+        continue;
+      }
+      return res;
+    } catch (err) {
+      if (attempt < maxRetries && (err.message?.includes('403') || err.code === 'ECONNRESET')) {
+        await new Promise(r => setTimeout(r, 400 * Math.pow(2, attempt)));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
 
 class InnerTubeClient {
   constructor(options = {}) {
@@ -112,7 +132,7 @@ class InnerTubeClient {
     if (useAgent) {
       fetchArgs.agent = useAgent;
     }
-    const res = await fetch(url, fetchArgs);
+    const res = await fetchWith403Retry(url, fetchArgs);
 
     if (!res.ok) {
       const text = await res.text();
@@ -140,7 +160,7 @@ class InnerTubeClient {
     const agent = getProxyAgent();
     if (agent) fetchArgs.agent = agent;
 
-    const res = await fetch(url, fetchArgs);
+    const res = await fetchWith403Retry(url, fetchArgs);
 
     if (!res.ok) {
       throw new Error(`InnerTube GET ${url}: ${res.status}`);
@@ -159,7 +179,7 @@ class InnerTubeClient {
       };
       const agent = getProxyAgent();
       if (agent) fetchArgs.agent = agent;
-      const res = await fetch('https://www.youtube.com/sw.js_data', fetchArgs);
+      const res = await fetchWith403Retry('https://www.youtube.com/sw.js_data', fetchArgs);
       const text = await res.text();
       const cleaned = text.replace(/^\)\]\}'\n/, '');
       const json = JSON.parse(cleaned);
@@ -193,12 +213,13 @@ class InnerTubeClient {
     return this._post(getInnertubeApiUrl('search'), body, MWEB);
   }
 
-  async liveChat(continuation) {
+  async liveChat(continuation, { replay = false, offsetMs = 0 } = {}) {
     const body = {
       context: this._makeContext(MWEB),
       continuation,
     };
-    return this._post(getInnertubeApiUrl('live_chat/get_live_chat'), body, MWEB);
+    if (replay) body.currentPlayerState = { playerOffsetMs: String(Math.max(0, Math.floor(offsetMs))) };
+    return this._post(getInnertubeApiUrl(replay ? 'live_chat/get_live_chat_replay' : 'live_chat/get_live_chat'), body, MWEB);
   }
 
   async browse(browseId, params = null, continuation = null) {
@@ -352,17 +373,72 @@ class InnerTubeClient {
     };
     const agent = getProxyAgent();
     if (agent) fetchArgs.agent = agent;
-    const res = await fetch(url, fetchArgs);
+    const res = await fetchWith403Retry(url, fetchArgs);
     if (!res.ok) throw new Error(`GET ${url}: ${res.status}`);
     return res.text();
   }
 
-  async browseAndroid(browseId) {
-    const body = {
-      context: this._makeContext(MWEB),
-      browseId,
+  async androidVrPlayer(videoId) {
+    const authHeader = await getVrAuthorization();
+    if (!authHeader) {
+      throw new Error('SABR is not configured on this server');
+    }
+
+    if (!this.visitorData) {
+      await this.fetchVisitorData();
+    }
+
+    const ctx = {
+      client: {
+        deviceMake: ANDROID_VR.deviceMake,
+        deviceModel: ANDROID_VR.deviceModel,
+        clientName: ANDROID_VR.clientName,
+        clientVersion: ANDROID_VR.clientVersion,
+        osName: ANDROID_VR.osName,
+        osVersion: ANDROID_VR.osVersion,
+        androidSdkVersion: Number(ANDROID_VR.androidSdkVersion),
+        hl: this.language,
+        gl: this.country,
+      }
     };
-    return this._post(getInnertubeApiUrl('browse'), body, MWEB);
+    if (this.visitorData) ctx.client.visitorData = this.visitorData;
+
+    const body = {
+      context: ctx,
+      videoId,
+      contentCheckOk: true,
+      racyCheckOk: true,
+    };
+
+    const headers = {
+      'Content-Type': 'application/json',
+      'User-Agent': ANDROID_VR.userAgent,
+      'X-YouTube-Client-Name': ANDROID_VR.clientId,
+      'X-YouTube-Client-Version': ANDROID_VR.clientVersion,
+      'X-Goog-Api-Format-Version': '2',
+      'Authorization': authHeader,
+    };
+    if (this.visitorData) headers['X-Goog-Visitor-Id'] = this.visitorData;
+
+    const url = 'https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false';
+    const fetchArgs = {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    };
+    const agent = getProxyAgent();
+    if (agent) fetchArgs.agent = agent;
+
+    const res = await fetchWith403Retry(url, fetchArgs);
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`InnerTube SABR player ${res.status}: ${text.substring(0, 200)}`);
+    }
+
+    const result = await res.json();
+    const vd = result?.responseContext?.visitorData;
+    if (vd) this.visitorData = vd;
+    return result;
   }
 }
 

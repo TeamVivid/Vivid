@@ -16,22 +16,41 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-import { getVideo, getStreams, getComments, getCommentReplies, getCaptions, getLiveChat, proxyImageUrl, proxyStreamUrl } from '../api.js';
+import videojs from 'video.js';
+import 'video.js/dist/video-js.css';
+import { getVideo, getStreams, getComments, getCommentReplies, getCaptions, proxyImageUrl, proxyStreamUrl, proxyHlsUrl, getSponsorBlockSegments, syncAccount } from '../api.js';
 import { escapeHtml } from '../router.js';
+import { getSettings, saveSettings, SPONSOR_CATEGORIES } from '../settings.js';
+import { getPlaylists, addVideoToPlaylist, removeVideoFromPlaylist, isVideoInPlaylist, createPlaylist, syncWithServer } from '../playlistManager.js';
+import { SabrMediaSourcePlayer } from '../sabrPlayer.js';
+import { DashMediaSourcePlayer } from '../dashPlayer.js';
+import { startLiveChat } from '../liveChat.js';
 
 let vjsPlayer = null;
 window.vjsPlayer = null;
 let audioTrackPlayer = null;
 let audioSyncInterval = null;
-let chatInterval = null;
+let stopChat = null;
 let sponsorSegments = [];
 const MEDIA_ACTIONS = ['play', 'pause', 'seekbackward', 'seekforward', 'seekto', 'nexttrack'];
-let userVolume = 1;
-let userMuted = false;
+const VOLUME_KEY = 'vivid_volume';
+const savedVolume = (() => {
+  try {
+    return JSON.parse(localStorage.getItem(VOLUME_KEY)) || {};
+  } catch {
+    return {};
+  }
+})();
+let userVolume = typeof savedVolume.volume === 'number' ? Math.min(Math.max(savedVolume.volume, 0), 1) : 1;
+let userMuted = !!savedVolume.muted;
 
 function stopPlayback() {
+  if (window.sabrPlayerInstance) {
+    window.sabrPlayerInstance.destroy();
+    window.sabrPlayerInstance = null;
+  }
   if (audioSyncInterval) { clearInterval(audioSyncInterval); audioSyncInterval = null; }
-  if (chatInterval) { clearTimeout(chatInterval); chatInterval = null; }
+  if (stopChat) { stopChat(); stopChat = null; }
   if ('mediaSession' in navigator) {
     navigator.mediaSession.metadata = null;
     for (const action of MEDIA_ACTIONS) navigator.mediaSession.setActionHandler(action, null);
@@ -112,9 +131,9 @@ export async function renderWatch(app, params) {
 
   const [detail, streams, captionsData, sponsorRes] = await Promise.allSettled([
     getVideo(videoId, listId),
-    getStreams(videoId),
+    getStreams(videoId, getSettings().trySabr),
     getCaptions(videoId),
-    fetch(`https://sponsor.ajay.app/api/skipSegments?videoID=${videoId}`)
+    getSettings().sponsorBlockEnabled ? getSponsorBlockSegments(videoId) : Promise.resolve([])
   ]);
 
   const detailObj = detail.status === 'fulfilled' ? detail.value : {};
@@ -122,8 +141,8 @@ export async function renderWatch(app, params) {
   const capsObj = captionsData.status === 'fulfilled' ? captionsData.value : null;
 
   sponsorSegments = [];
-  if (sponsorRes.status === 'fulfilled' && sponsorRes.value.ok) {
-    try { sponsorSegments = await sponsorRes.value.json(); } catch(e) {}
+  if (sponsorRes.status === 'fulfilled' && Array.isArray(sponsorRes.value)) {
+    sponsorSegments = sponsorRes.value;
   }
 
   if (detailObj.error && !detailObj.title) {
@@ -137,13 +156,46 @@ export async function renderWatch(app, params) {
   if (detailObj.title) {
     document.title = `${detailObj.title} - Vivid`;
   }
+
+  const appSettings = getSettings();
   const qualities = [];
+
+  const trackKey = (a) => `${a.audioTrackId || ''}|${a.displayName || ''}`;
+
+  const sabrAudioFor = (video, choice) => {
+    const container = video.mimeType.split(';')[0].split('/')[1];
+    const sameContainer = streamsObj.audioStreams.filter(a => a.mimeType.includes(`/${container}`));
+    const pool = sameContainer.length ? sameContainer : streamsObj.audioStreams;
+    return (choice && pool.find(a => trackKey(a) === trackKey(choice)))
+      || pool.find(a => a.isDefault) || pool.find(a => a.isOriginal) || pool[0];
+  };
+
+  if (streamsObj.sabr?.available && appSettings.trySabr) {
+    if (streamsObj.qualityMap && Object.keys(streamsObj.qualityMap).length) {
+      for (const [res, stream] of Object.entries(streamsObj.qualityMap).sort((a,b)=>b[0]-a[0])) {
+        qualities.push({
+          label: `${res}p (SABR)`,
+          type: 'sabr',
+          sabrInfo: streamsObj.sabr,
+          videoFmt: stream,
+        });
+      }
+    } else if (streamsObj.bestVideo && streamsObj.bestAudio) {
+      qualities.push({
+        label: 'SABR (Adaptive)',
+        type: 'sabr',
+        sabrInfo: streamsObj.sabr,
+        videoFmt: streamsObj.bestVideo,
+      });
+    }
+  }
+
   if (streamsObj.combinedStreams?.length) {
     qualities.push({ label: '360p', url: streamsObj.combinedStreams[0].url, type: 'combined' });
   }
-  if (streamsObj.qualityMap) {
+  if (streamsObj.qualityMap && !streamsObj.sabr?.available) {
     for (const [res, stream] of Object.entries(streamsObj.qualityMap).sort((a,b)=>b[0]-a[0])) {
-      qualities.push({ label: `${res}p`, url: stream.url, audioUrl: streamsObj.bestAudio?.url, type: 'adaptive' });
+      qualities.push({ label: `${res}p`, url: stream.url, mimeType: stream.mimeType, audioUrl: streamsObj.bestAudio?.url, type: 'adaptive' });
     }
   }
 
@@ -151,7 +203,7 @@ export async function renderWatch(app, params) {
   const seenTracks = new Set();
   const audioOptions = (streamsObj.audioStreams || []).filter(a => {
     if (!probe.canPlayType(a.mimeType)) return false;
-    const key = `${a.audioTrackId || ''}|${a.displayName || ''}`;
+    const key = trackKey(a);
     if (seenTracks.has(key)) return false;
     seenTracks.add(key);
     return true;
@@ -160,7 +212,7 @@ export async function renderWatch(app, params) {
   if (initialAudioIdx === -1) initialAudioIdx = audioOptions.findIndex(a => a.isOriginal);
   if (initialAudioIdx === -1) initialAudioIdx = 0;
 
-  let initialQ = qualities.find(q => q.label === '720p') || qualities.find(q => q.label === '360p') || qualities[0];
+  let initialQ = qualities.find(q => q.label.startsWith('720p')) || qualities.find(q => q.label.startsWith('1080p')) || qualities.find(q => q.label.startsWith('360p')) || qualities[0];
 
   const playlist = detailObj.playlist || null;
   const playlistVideos = playlist?.videos || [];
@@ -185,14 +237,15 @@ export async function renderWatch(app, params) {
           <video id="vjs-video" class="video-js vjs-default-skin vjs-big-play-centered" controls preload="auto" width="100%" height="auto"></video>
         </div>
 
-        ${detailObj.isLivestream ? `
-          <div class="live-chat-panel" style="margin-top:1rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;display:flex;flex-direction:column;height:400px;">
-            <div style="background:var(--bg-tertiary);padding:8px 12px;font-weight:600;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;">
-              <span>Live Chat</span><span style="color:#f00;font-size:0.75rem;">● LIVE</span>
+        ${detailObj.liveChat ? `
+          <div class="live-chat-panel">
+            <div class="live-chat-header">
+              <span>${detailObj.liveChat.isReplay ? 'Chat Replay' : 'Live Chat'}</span>
+              <span id="live-chat-status" class="live-chat-status"></span>
+              ${detailObj.liveChat.modes.length ? `<select id="live-chat-mode" class="live-chat-mode">${detailObj.liveChat.modes.map(m => `<option value="${escapeHtml(m.continuation)}" ${m.selected ? 'selected' : ''}>${escapeHtml(m.title)}</option>`).join('')}</select>` : ''}
+              ${detailObj.liveChat.isReplay ? '' : '<span class="live-chat-badge">● LIVE</span>'}
             </div>
-            <div id="live-chat-messages" style="flex:1;overflow-y:auto;padding:8px;font-size:0.85rem;display:flex;flex-direction:column;gap:6px;">
-              <div style="color:var(--text-muted);text-align:center;margin-top:20px;">Waiting for messages...</div>
-            </div>
+            <div id="live-chat-messages" class="live-chat-messages"></div>
           </div>
         ` : ''}
 
@@ -215,6 +268,12 @@ export async function renderWatch(app, params) {
           </svg>
           <span>Share</span>
           </span>
+          <span id="save-pl-btn" class="watch-like-btn" style="cursor: pointer; display: inline-flex; align-items: center; gap: 6px;">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+          </svg>
+          <span>Save</span>
+          </span>
           </div>
           ${detailObj.author?.id ? `
             <div class="watch-channel">
@@ -225,6 +284,7 @@ export async function renderWatch(app, params) {
                 <a href="#/channel/${detailObj.author.id}" class="watch-channel-name">${escapeHtml(detailObj.author.name || '')}</a>
                 ${detailObj.author.subscribers ? `<div class="watch-channel-subs">${escapeHtml(detailObj.author.subscribers)}</div>` : ''}
               </div>
+              <button id="watch-sub-btn" class="watch-sub-btn" style="margin-left:auto; padding:6px 16px; background:#e50914; color:#fff; border:none; border-radius:16px; font-weight:600; cursor:pointer;">Subscribe</button>
             </div>
           ` : ''}
           ${detailObj.description ? `
@@ -281,9 +341,21 @@ export async function renderWatch(app, params) {
     }
   });
 
-  if (detailObj.isLivestream && streamsObj.hlsManifestUrl) {
-    vjsPlayer.src({ src: streamsObj.hlsManifestUrl, type: 'application/x-mpegURL' });
-    if (detailObj.liveChatContinuationToken) setupLiveChat(videoId, detailObj.liveChatContinuationToken);
+  const isLiveHls = !!streamsObj.hlsManifestUrl && (detailObj.isLivestream || !qualities.length);
+  if (isLiveHls) {
+    vjsPlayer.on('error', () => console.warn('[HLS]', vjsPlayer.error()));
+    vjsPlayer.src({ src: proxyHlsUrl(streamsObj.hlsManifestUrl), type: 'application/x-mpegURL' });
+  }
+
+  if (detailObj.liveChat) {
+    stopChat = startLiveChat({
+      videoId,
+      chat: detailObj.liveChat,
+      player: vjsPlayer,
+      listEl: document.getElementById('live-chat-messages'),
+      modeEl: document.getElementById('live-chat-mode'),
+      statusEl: document.getElementById('live-chat-status'),
+    });
   }
 
   const playNext = () => {
@@ -324,13 +396,10 @@ export async function renderWatch(app, params) {
   </select>
   </div>
   <div class="vjs-settings-section">
-  <label><input type="checkbox" id="ps-loop"> Loop Video</label>
+  <label><input type="checkbox" id="ps-loop" ${appSettings.loop ? 'checked' : ''}> Loop Video</label>
   </div>
   <div class="vjs-settings-section">
-  <label><input type="checkbox" id="ps-sponsor" checked> Skip Sponsor Segments</label>
-  </div>
-  <div class="vjs-settings-section">
-  <label><input type="checkbox" id="ps-autoplay"> Autoplay</label>
+  <label><input type="checkbox" id="ps-autoplay" ${appSettings.autoplay ? 'checked' : ''}> Autoplay</label>
   </div>
   </div>
   `;
@@ -416,6 +485,9 @@ export async function renderWatch(app, params) {
     const newMuted = vjsPlayer.muted();
     userVolume = newVolume;
     userMuted = newMuted;
+    try {
+      localStorage.setItem(VOLUME_KEY, JSON.stringify({ volume: newVolume, muted: newMuted }));
+    } catch {}
 
     if (isAudioTrackActive && audioTrackPlayer) {
       audioTrackPlayer.volume = newVolume;
@@ -517,7 +589,7 @@ export async function renderWatch(app, params) {
     for (const [action, handler] of Object.entries(actions)) session.setActionHandler(action, handler);
   }
 
-  if (initialQ) setStream(initialQ, initialQ.type === 'adaptive' ? audioOptions[initialAudioIdx] : null);
+  if (initialQ && !isLiveHls) setStream(initialQ, initialQ.type === 'combined' ? null : audioOptions[initialAudioIdx]);
 
   let lastHardSync = 0;
   if (audioSyncInterval) clearInterval(audioSyncInterval);
@@ -535,24 +607,111 @@ export async function renderWatch(app, params) {
     }
   }, 1000);
 
+  function sponsorMode(seg) {
+    const cfg = getSettings();
+    if (!cfg.sponsorBlockEnabled) return 'disabled';
+    const cat = seg.category || 'sponsor';
+    return cfg.sponsorCategories[cat] || SPONSOR_CATEGORIES[cat]?.defaultBehavior || 'skip_show';
+  }
+
+  function renderSponsorMarkers() {
+    if (!vjsPlayer) return;
+    const progressHolder = vjsPlayer.el().querySelector('.vjs-progress-holder');
+    if (!progressHolder) return;
+    let container = progressHolder.querySelector('.vjs-sponsor-markers-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.className = 'vjs-sponsor-markers-container';
+      progressHolder.appendChild(container);
+    }
+    container.innerHTML = '';
+    const duration = vjsPlayer.duration();
+    if (!duration || duration <= 0 || !sponsorSegments.length) return;
+    for (const seg of sponsorSegments) {
+      const cat = seg.category || 'sponsor';
+      if (sponsorMode(seg) === 'disabled') continue;
+      const catInfo = SPONSOR_CATEGORIES[cat] || { name: cat, color: '#00d46a' };
+      const start = Math.max(0, seg.segment[0]);
+      const end = Math.min(duration, seg.segment[1]);
+      if (start >= end) continue;
+      const left = (start / duration) * 100;
+      const width = Math.max(0.3, ((end - start) / duration) * 100);
+      const marker = document.createElement('div');
+      marker.className = 'vjs-sponsor-marker';
+      marker.style.cssText = `position:absolute;left:${left}%;width:${width}%;height:100%;background:${catInfo.color};opacity:0.85;border-radius:1px;pointer-events:none;`;
+      marker.title = `${catInfo.name} (${Math.round(start)}s - ${Math.round(end)}s)`;
+      container.appendChild(marker);
+    }
+  }
+
+  vjsPlayer.on('loadedmetadata', renderSponsorMarkers);
+  vjsPlayer.on('durationchange', renderSponsorMarkers);
+  setTimeout(renderSponsorMarkers, 500);
+
   vjsPlayer.on('timeupdate', () => {
-    if (!document.getElementById('ps-sponsor')?.checked || !sponsorSegments.length) return;
+    if (!sponsorSegments.length) return;
     const ct = vjsPlayer.currentTime();
     for (const seg of sponsorSegments) {
-      if (ct >= seg.segment[0] && ct < seg.segment[1]) { vjsPlayer.currentTime(seg.segment[1]); break; }
+      if (sponsorMode(seg) === 'skip_show' && ct >= seg.segment[0] && ct < seg.segment[1]) {
+        vjsPlayer.currentTime(seg.segment[1]);
+        break;
+      }
     }
   });
 
-  function setStream(q, audioChoice) {
+  async function setStream(q, audioChoice) {
     const ct = vjsPlayer.currentTime() || 0;
     const paused = vjsPlayer.paused();
 
-    vjsPlayer.src({ type: 'video/mp4', src: proxyStreamUrl(q.url) });
+    if (window.sabrPlayerInstance) {
+      window.sabrPlayerInstance.destroy();
+      window.sabrPlayerInstance = null;
+    }
+
+    const mp4Audio = q.type === 'adaptive' && audioChoice && q.mimeType?.includes('mp4')
+      ? (audioChoice.mimeType.includes('mp4') ? audioChoice : streamsObj.audioStreams.find(a =>
+          a.mimeType.includes('mp4') && trackKey(a) === trackKey(audioChoice)))
+      : null;
+
     const audioSelect = document.getElementById('ps-audio');
     if (audioSelect) {
-      audioSelect.disabled = q.type !== 'adaptive';
-      audioSelect.style.opacity = q.type !== 'adaptive' ? '0.5' : '1';
+      audioSelect.disabled = q.type === 'combined';
+      audioSelect.style.opacity = q.type === 'combined' ? '0.5' : '1';
     }
+
+    if (q.type === 'sabr' || mp4Audio) {
+      isAudioTrackActive = false;
+      audioTrackPlayer.pause();
+      audioTrackPlayer.src = '';
+      try {
+        const vidEl = vjsPlayer.tech({ IWillNotUseThisInPlugins: true })?.el() || vjsPlayer.el().querySelector('video');
+        const player = q.type === 'sabr'
+          ? new SabrMediaSourcePlayer({ video: vidEl, sabrInfo: q.sabrInfo, videoFmt: q.videoFmt, audioFmt: sabrAudioFor(q.videoFmt, audioChoice) })
+          : new DashMediaSourcePlayer({
+              video: vidEl,
+              videoFmt: { url: proxyStreamUrl(q.url), mimeType: q.mimeType },
+              audioFmt: { url: proxyStreamUrl(mp4Audio.url), mimeType: mp4Audio.mimeType },
+            });
+        window.sabrPlayerInstance = player;
+        await player.init();
+        vjsPlayer.currentTime(ct);
+        if (!paused) vjsPlayer.play();
+        return;
+      } catch (e) {
+        console.warn('Streaming failed, falling back:', e);
+        if (window.sabrPlayerInstance) {
+          window.sabrPlayerInstance.destroy();
+          window.sabrPlayerInstance = null;
+        }
+        if (q.type === 'sabr') {
+          const fallback = qualities.find(x => x.type === 'adaptive' || x.type === 'combined');
+          if (fallback) setStream(fallback, audioChoice);
+          return;
+        }
+      }
+    }
+
+    vjsPlayer.src({ type: 'video/mp4', src: proxyStreamUrl(q.url) });
 
     if (q.type === 'adaptive') {
       isAudioTrackActive = true;
@@ -596,7 +755,9 @@ export async function renderWatch(app, params) {
   document.getElementById('ps-audio').addEventListener('change', (e) => {
     const q = qualities[document.getElementById('ps-quality').value];
     const a = audioOptions[e.target.value];
-    if (q?.type === 'adaptive') {
+    if (q?.type === 'sabr' || (q?.type === 'adaptive' && window.sabrPlayerInstance)) {
+      setStream(q, a);
+    } else if (q?.type === 'adaptive') {
       audioTrackPlayer.src = proxyStreamUrl(a.url);
       audioTrackPlayer.addEventListener('loadedmetadata', () => {
         audioTrackPlayer.currentTime = vjsPlayer.currentTime();
@@ -605,10 +766,68 @@ export async function renderWatch(app, params) {
     }
   });
 
+  document.getElementById('ps-autoplay').addEventListener('change', (e) => {
+    saveSettings({ ...getSettings(), autoplay: e.target.checked });
+  });
+
   document.getElementById('ps-loop').addEventListener('change', (e) => {
     vjsPlayer.loop(e.target.checked);
   });
 
+  const savePlBtn = document.getElementById('save-pl-btn');
+  if (savePlBtn) {
+    savePlBtn.addEventListener('click', () => {
+      openSavePlaylistModal({
+        videoId,
+        title: detailObj.title || '',
+        author: detailObj.author?.name || '',
+        thumbnailUrl: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+        duration: detailObj.duration || '',
+      });
+    });
+
+    savePlBtn.addEventListener('mouseenter', () => {
+      savePlBtn.style.background = 'var(--bg-tertiary)';
+      savePlBtn.style.borderColor = 'var(--accent)';
+      savePlBtn.style.color = 'var(--accent)';
+    });
+
+    savePlBtn.addEventListener('mouseleave', () => {
+      savePlBtn.style.background = 'none';
+      savePlBtn.style.borderColor = 'var(--border)';
+      savePlBtn.style.color = 'var(--text-secondary)';
+    });
+  }
+
+  const watchSubBtn = document.getElementById('watch-sub-btn');
+  const authorId = detailObj.author?.id;
+  if (watchSubBtn && authorId) {
+    const updateSubBtn = () => {
+      const subs = JSON.parse(localStorage.getItem('vivid_subs') || '[]');
+      const isSub = subs.includes(authorId);
+      watchSubBtn.textContent = isSub ? 'Subscribed' : 'Subscribe';
+      watchSubBtn.style.background = isSub ? 'var(--bg-tertiary)' : '#e50914';
+      watchSubBtn.style.color = isSub ? 'var(--text-primary)' : '#fff';
+      watchSubBtn.style.border = isSub ? '1px solid var(--border)' : 'none';
+    };
+    updateSubBtn();
+    watchSubBtn.addEventListener('click', async () => {
+      let subs = JSON.parse(localStorage.getItem('vivid_subs') || '[]');
+      if (subs.includes(authorId)) {
+        subs = subs.filter(id => id !== authorId);
+      } else {
+        subs.push(authorId);
+      }
+      localStorage.setItem('vivid_subs', JSON.stringify(subs));
+      updateSubBtn();
+      const token = localStorage.getItem('vivid_auth_token');
+      if (token) {
+        try {
+          await syncAccount(token, { subscriptions: subs, playlists: getPlaylists() });
+        } catch {}
+      }
+    });
+  }
 
   const shareBtn = document.getElementById('share-btn');
   if (shareBtn) {
@@ -624,7 +843,6 @@ export async function renderWatch(app, params) {
         }).catch(err => console.log('Error sharing:', err));
       } else {
         navigator.clipboard.writeText(shareUrl).then(() => {
-          const originalText = shareBtn.textContent;
           shareBtn.textContent = 'Copied!';
           setTimeout(() => {
             shareBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -711,38 +929,6 @@ function attachReplyListeners(videoId) {
   });
 }
 
-async function setupLiveChat(videoId, initialToken) {
-  let currentToken = initialToken;
-  const chatList = document.getElementById('live-chat-messages');
-  if (!chatList) return;
-  const poll = async () => {
-    if (!currentToken) return;
-    try {
-      const data = await getLiveChat(videoId, currentToken);
-      if (data.messages?.length > 0) {
-        if (chatList.innerHTML.includes('Waiting for messages...')) chatList.innerHTML = '';
-        for (const m of data.messages) {
-          chatList.insertAdjacentHTML('beforeend', `
-            <div class="chat-msg" style="display:flex;gap:8px;align-items:flex-start;">
-              <img src="${proxyImageUrl(m.authorIcon)}" style="width:24px;height:24px;border-radius:50%;flex-shrink:0;">
-              <div>
-                <span style="font-weight:600;color:${m.isOwner ? '#f00' : 'var(--text-secondary)'};font-size:0.8rem;">${escapeHtml(m.authorName)}</span>
-                <span style="margin-left:4px;">${escapeHtml(m.content)}</span>
-              </div>
-            </div>
-          `);
-        }
-        chatList.scrollTop = chatList.scrollHeight;
-      }
-      currentToken = data.continuationToken;
-      chatInterval = setTimeout(poll, data.timeoutMs || 5000);
-    } catch (e) {
-      chatInterval = setTimeout(poll, 10000);
-    }
-  };
-  poll();
-}
-
 function renderSuggestion(s, listId, i, currentIdx) {
   if (!s) return '';
   const videoId = s.videoId || s.id;
@@ -814,4 +1000,75 @@ function renderComment(c, videoId, isReply = false) {
       </div>
     </div>
   `;
+}
+
+function openSavePlaylistModal(videoObj) {
+  const existing = document.getElementById('save-playlist-modal');
+  if (existing) existing.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'save-playlist-modal';
+  modal.className = 'modal-backdrop';
+
+  const renderContent = () => {
+    const playlists = getPlaylists();
+    const listHtml = playlists.length === 0
+      ? '<p style="color:var(--text-muted);margin:10px 0;">No playlists yet. Create one below!</p>'
+      : playlists.map(pl => {
+          const inPl = isVideoInPlaylist(pl.id, videoObj.videoId);
+          return `
+            <label style="display:flex;align-items:center;gap:10px;padding:6px 0;cursor:pointer;color:var(--text-primary);">
+              <input type="checkbox" data-pl-id="${pl.id}" ${inPl ? 'checked' : ''} style="accent-color:var(--accent);">
+              <span style="font-weight:500;">${escapeHtml(pl.name)}</span>
+              <span style="color:var(--text-muted);font-size:0.8rem;margin-left:auto;">(${pl.videos?.length || 0})</span>
+            </label>
+          `;
+        }).join('');
+
+    modal.innerHTML = `
+      <div class="modal-box" style="max-width:380px;">
+        <div class="modal-header">
+          <h2 class="modal-title">Save to Playlist</h2>
+          <button class="modal-close-btn" id="save-pl-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div id="save-pl-items" style="max-height:220px;overflow-y:auto;margin-bottom:1rem;">
+            ${listHtml}
+          </div>
+          <div style="display:flex;gap:8px;border-top:1px solid var(--border);padding-top:12px;">
+            <input type="text" id="new-pl-input" class="form-input" placeholder="New playlist name..." style="flex:1;">
+            <button id="new-pl-btn" class="modal-btn-primary" style="white-space:nowrap;">Create</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    modal.querySelector('#save-pl-close').addEventListener('click', () => modal.remove());
+    modal.querySelectorAll('input[data-pl-id]').forEach(input => {
+      input.addEventListener('change', (e) => {
+        const plId = e.target.getAttribute('data-pl-id');
+        if (e.target.checked) {
+          addVideoToPlaylist(plId, videoObj);
+        } else {
+          removeVideoFromPlaylist(plId, videoObj.videoId);
+        }
+      });
+    });
+
+    const createBtn = modal.querySelector('#new-pl-btn');
+    const createInput = modal.querySelector('#new-pl-input');
+    createBtn.addEventListener('click', () => {
+      const name = createInput.value.trim();
+      if (!name) return;
+      const newPl = createPlaylist(name);
+      addVideoToPlaylist(newPl.id, videoObj);
+      renderContent();
+    });
+  };
+
+  renderContent();
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
+  document.body.appendChild(modal);
 }

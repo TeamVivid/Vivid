@@ -18,7 +18,16 @@
 
 import { defineConfig } from 'vite';
 
+const stripHtmlComments = () => ({
+  name: 'strip-html-comments',
+  transformIndexHtml: {
+    order: 'post',
+    handler: (html) => html.replace(/<!--[\s\S]*?-->\s*/g, ''),
+  },
+});
+
 export default defineConfig({
+  plugins: [stripHtmlComments()],
   server: {
     port: 5066,
     proxy: {

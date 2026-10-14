@@ -21,6 +21,16 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
   convertUrlToMobile, parseQueryParams, getVideoIdFromThumbnailUrl, formatCount, formatWithCommas } from './utils.js';
   import fetch from 'node-fetch';
 
+  function findKey(node, key) {
+    if (!node || typeof node !== 'object') return null;
+    if (node[key]) return node[key];
+    for (const value of Object.values(node)) {
+      const found = findKey(value, key);
+      if (found) return found;
+    }
+    return null;
+  }
+
   async function fetchLikeDislikeCounts(videoId) {
     try {
       const res = await fetch(`https://returnyoutubedislikeapi.com/votes?videoId=${videoId}`);
@@ -220,10 +230,6 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
       for (const panel of nextData.engagementPanels || []) {
         const panelContent = panel?.engagementPanelSectionListRenderer?.content;
 
-        if (panel.engagementPanelSectionListRenderer?.panelIdentifier === 'engagement-panel-live-chat') {
-          result.isLivestream = true;
-        }
-
         if (panelContent?.structuredDescriptionContentRenderer) {
           for (const item of panelContent.structuredDescriptionContentRenderer.items || []) {
             if (item.expandableVideoDescriptionBodyRenderer) {
@@ -265,10 +271,18 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
         }
       }
 
-      if (nextData.contents?.singleColumnWatchNextResults?.conversationBar?.liveChatRenderer) {
-        result.isLivestream = true;
-        const chat = nextData.contents.singleColumnWatchNextResults.conversationBar.liveChatRenderer;
-        result.liveChatContinuationToken = chat.continuations?.[0]?.reloadContinuationData?.continuation || '';
+      const chat = findKey(nextData, 'liveChatRenderer');
+      const chatToken = chat?.continuations?.[0]?.reloadContinuationData?.continuation || '';
+      if (chatToken) {
+        const modes = chat.header?.liveChatHeaderRenderer?.viewSelector?.sortFilterSubMenuRenderer?.subMenuItems || [];
+        result.liveChat = {
+          token: chatToken,
+          isReplay: !!chat.isReplay,
+          modes: modes
+            .map(m => ({ title: m.title || '', continuation: m.continuation?.reloadContinuationData?.continuation || '', selected: !!m.selected }))
+            .filter(m => m.continuation),
+        };
+        if (!chat.isReplay) result.isLivestream = true;
       }
 
       const playlistObj = watchNext?.playlist?.playlist;
@@ -377,6 +391,34 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
         for (const item of obj) collectVideos(item);
         return;
       }
+      if (obj.lockupViewModel) {
+        const lm = obj.lockupViewModel;
+        const videoId = lm.contentId || '';
+        if (videoId) {
+          const title = lm.metadata?.lockupMetadataViewModel?.title?.content || '';
+          const author = lm.metadata?.lockupMetadataViewModel?.metadata?.contentMetadataViewModel?.metadataRows?.[0]?.metadataParts?.[0]?.text?.content || '';
+          const views = lm.metadata?.lockupMetadataViewModel?.metadata?.contentMetadataViewModel?.metadataRows?.[1]?.metadataParts?.[0]?.text?.content || '';
+          let duration = '';
+          const badges = lm.contentImage?.thumbnailViewModel?.overlays?.[0]?.thumbnailBottomOverlayViewModel?.badges || [];
+          if (badges.length > 0) {
+            duration = badges[0]?.thumbnailBadgeViewModel?.text || '';
+          }
+          const sources = lm.contentImage?.thumbnailViewModel?.image?.sources || [];
+          const thumb = sources[sources.length - 1]?.url || getVideoThumbnailUrl(videoId);
+          result.videos.push({
+            videoId,
+            id: videoId,
+            title,
+            author,
+            authorName: author,
+            views,
+            duration,
+            thumbnailUrl: thumb,
+            url: `/watch?v=${videoId}&list=${playlistId}`,
+          });
+          return;
+        }
+      }
       if (obj.playlistVideoRenderer) {
         const v = parsePlaylistVideo(obj.playlistVideoRenderer);
         if (v) result.videos.push(v);
@@ -384,6 +426,16 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
       }
       if (obj.playlistPanelVideoRenderer) {
         const v = parsePlaylistVideo(obj.playlistPanelVideoRenderer);
+        if (v) result.videos.push(v);
+        return;
+      }
+      if (obj.compactVideoRenderer) {
+        const v = parsePlaylistVideo(obj.compactVideoRenderer);
+        if (v) result.videos.push(v);
+        return;
+      }
+      if (obj.videoRenderer) {
+        const v = parsePlaylistVideo(obj.videoRenderer);
         if (v) result.videos.push(v);
         return;
       }
@@ -397,6 +449,21 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
     try {
       let data = await client.browse(`VL${playlistId}`);
 
+      const pageHeader = data?.header?.pageHeaderRenderer?.content?.pageHeaderViewModel;
+      if (pageHeader) {
+        result.title = pageHeader.title?.dynamicTextViewModel?.text?.content || '';
+        const rows = pageHeader.metadata?.contentMetadataViewModel?.metadataRows || [];
+        if (rows[0]?.metadataParts?.[0]?.text?.content) {
+          result.authorName = rows[0].metadataParts[0].text.content;
+        }
+        if (rows[1]?.metadataParts?.[0]?.text?.content) {
+          result.videoCount = parseInt(rows[1].metadataParts[0].text.content) || 0;
+        }
+        if (rows[1]?.metadataParts?.[1]?.text?.content) {
+          result.viewCount = rows[1].metadataParts[1].text.content;
+        }
+      }
+
       const header =
       data?.header?.playlistHeaderRenderer ||
       data?.header?.playlistPanelRenderer ||
@@ -404,13 +471,14 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
       null;
 
       if (header) {
-        result.title = header.title?.simpleText || header.title?.runs?.[0]?.text || '';
+        result.title = result.title || header.title?.simpleText || header.title?.runs?.[0]?.text || '';
         result.authorName =
+        result.authorName ||
         header.ownerText?.runs?.[0]?.text ||
         header.subtitle?.runs?.[0]?.text ||
         header.channelHandleText?.runs?.[0]?.text || '';
-        result.viewCount = header.viewCountText?.simpleText || '';
-        result.videoCount = parseInt(header.numVideosText?.runs?.[0]?.text || '0') || 0;
+        result.viewCount = result.viewCount || header.viewCountText?.simpleText || '';
+        result.videoCount = result.videoCount || parseInt(header.numVideosText?.runs?.[0]?.text || '0') || 0;
       }
 
       if (!result.title) {

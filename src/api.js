@@ -16,10 +16,30 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+
 const API_BASE = '/api/v1';
 
-async function fetchJson(url) {
-  const res = await fetch(url);
+async function fetchWithRetry(url, options = {}, maxRetries = 3) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, options);
+      if (res.status === 403 && attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 400 * Math.pow(2, attempt)));
+        continue;
+      }
+      return res;
+    } catch (e) {
+      if (attempt < maxRetries && (e.message?.includes('403') || e.code === 'ECONNRESET')) {
+        await new Promise(r => setTimeout(r, 400 * Math.pow(2, attempt)));
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
+async function fetchJson(url, options = {}) {
+  const res = await fetchWithRetry(url, options);
   if (!res.ok) throw new Error(`API Error: ${res.status}`);
   return res.json();
 }
@@ -44,8 +64,9 @@ export async function getVideo(id, listId = null) {
   return fetchJson(`${API_BASE}/videos/${id}${params}`);
 }
 
-export async function getStreams(id) {
-  return fetchJson(`${API_BASE}/streams/${id}`);
+export async function getStreams(id, includeSabr = true) {
+  const qs = includeSabr ? '?include_and_try_sabr=true' : '';
+  return fetchJson(`${API_BASE}/streams/${id}${qs}`);
 }
 
 export async function getComments(id, continuation = null, type = null) {
@@ -62,8 +83,9 @@ export async function getCommentReplies(id, continuation) {
   return fetchJson(`${API_BASE}/comments/${id}/replies?${params.toString()}`);
 }
 
-export async function getLiveChat(id, continuation) {
-  return fetchJson(`${API_BASE}/livechat/${id}?continuation=${encodeURIComponent(continuation)}`);
+export async function getLiveChat(id, continuation, { replay = false, offsetMs = 0 } = {}) {
+  const qs = `continuation=${encodeURIComponent(continuation)}${replay ? `&replay=1&offset=${Math.floor(offsetMs)}` : ''}`;
+  return fetchJson(`${API_BASE}/livechat/${id}?${qs}`);
 }
 
 export async function getChannel(id) {
@@ -92,12 +114,22 @@ export async function getChannelContinuation(id, token) {
 
 export function proxyImageUrl(url) {
   if (!url) return '';
+  if (url.startsWith('//')) url = 'https:' + url;
   return `${API_BASE}/proxy/image?url=${encodeURIComponent(url)}`;
+}
+
+export function proxyHlsUrl(url) {
+  if (!url) return '';
+  return `${API_BASE}/proxy/hls?url=${encodeURIComponent(url)}`;
 }
 
 export function proxyStreamUrl(url) {
   if (!url) return '';
   return `${API_BASE}/proxy/stream?url=${encodeURIComponent(url)}`;
+}
+
+export async function getSponsorBlockSegments(videoId) {
+  return fetchJson(`${API_BASE}/proxy/sponsorblock?videoID=${encodeURIComponent(videoId)}`);
 }
 
 export async function getCaptions(id) {
@@ -114,4 +146,44 @@ export async function getSearchSuggestions(query) {
 
 export async function getPlaylist(id) {
   return fetchJson(`${API_BASE}/playlists/${id}`);
+}
+
+export async function registerAccount(username, password) {
+  return fetchJson(`${API_BASE}/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password })
+  });
+}
+
+export async function loginAccount(username, password) {
+  return fetchJson(`${API_BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password })
+  });
+}
+
+export async function getAccountMe(token) {
+  return fetchJson(`${API_BASE}/auth/me`, {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+}
+
+export async function syncAccount(token, data) {
+  return fetchJson(`${API_BASE}/auth/sync`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify(data)
+  });
+}
+
+export async function logoutAccount(token) {
+  return fetchJson(`${API_BASE}/auth/logout`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
 }

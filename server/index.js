@@ -32,6 +32,8 @@ import streamRoutes from './routes/stream.js';
 import proxyRoutes from './routes/proxy.js';
 import livechatRouter from './routes/livechat.js';
 import playlistRouter from './routes/playlists.js';
+import authRoutes from './routes/auth.js';
+import { version, status, checkForUpdates } from './version.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -61,19 +63,21 @@ app.use('/api/v1/streams', streamRoutes);
 app.use('/api/v1/proxy', proxyRoutes);
 app.use('/api/v1/livechat', livechatRouter);
 app.use('/api/v1/playlists', playlistRouter);
+app.use('/api/v1/auth', authRoutes);
 
 app.get('/api/v1', (req, res) => {
   res.json({
     name: 'Vivid API',
-    version: '1.0.0',
+    version,
+    behind: status.behind,
     website: 'https://github.com/Youtube-Hackers/vivid'
   });
 });
 
 const distPath = join(__dirname, '..', 'dist');
 app.use(express.static(distPath));
-app.get('*', (req, res) => {
-  if (req.path.startsWith('/api/') || (req.path.includes('.') && !req.path.startsWith('/@'))) {
+app.use((req, res) => {
+  if (!['GET', 'HEAD'].includes(req.method) || req.path.startsWith('/api/') || (req.path.includes('.') && !req.path.startsWith('/@'))) {
     return res.status(404).send('Not found');
   }
   
@@ -86,7 +90,8 @@ app.get('*', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Vivid is running on http://localhost:${PORT}`);
+  console.log(`Vivid ${version} is running on http://localhost:${PORT}`);
+  checkForUpdates();
 });
 
 export default app;

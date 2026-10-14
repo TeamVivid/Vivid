@@ -18,56 +18,107 @@
 
 import { getTextFromObject, getThumbnailUrlExact } from './utils.js';
 
-export async function getLiveChat(client, continuationToken) {
+function toParts(obj) {
+  const parts = [];
+  for (const run of obj?.runs || []) {
+    if (run.emoji) {
+      const id = run.emoji.emojiId || '';
+      const url = run.emoji.image?.thumbnails?.[0]?.url;
+      if (id && !id.includes('/') && id.length <= 8) parts.push({ text: id });
+      else if (url) parts.push({ emoji: url, label: run.emoji.shortcuts?.[0] || '' });
+    } else if (run.text) {
+      parts.push({ text: run.text });
+    }
+  }
+  if (!parts.length && obj?.simpleText) parts.push({ text: obj.simpleText });
+  return parts;
+}
+
+function toColor(argb) {
+  return argb == null ? '' : `#${(argb & 0xffffff).toString(16).padStart(6, '0')}`;
+}
+
+function parseMessage(item, offsetMs) {
+  const kinds = {
+    liveChatTextMessageRenderer: 'text',
+    liveChatPaidMessageRenderer: 'paid',
+    liveChatPaidStickerRenderer: 'sticker',
+    liveChatMembershipItemRenderer: 'member',
+  };
+  const key = Object.keys(kinds).find(k => item[k]);
+  if (!key) return null;
+  const r = item[key];
+
+  const badges = (r.authorBadges || []).map(b => b.liveChatAuthorBadgeRenderer).filter(Boolean);
+  const msg = {
+    id: r.id,
+    type: kinds[key],
+    authorName: getTextFromObject(r.authorName),
+    authorIcon: getThumbnailUrlExact(r.authorPhoto?.thumbnails, 32),
+    authorId: r.authorExternalChannelId || '',
+    parts: toParts(r.message),
+    timestamp: r.timestampText ? getTextFromObject(r.timestampText) : '',
+    offsetMs,
+    isOwner: badges.some(b => b.icon?.iconType === 'OWNER'),
+    isModerator: badges.some(b => b.icon?.iconType === 'MODERATOR'),
+    isMember: badges.some(b => b.customThumbnail),
+  };
+
+  if (msg.type === 'paid' || msg.type === 'sticker') {
+    msg.amount = getTextFromObject(r.purchaseAmountText);
+    msg.bodyColor = toColor(r.bodyBackgroundColor ?? r.backgroundColor);
+    msg.headerColor = toColor(r.headerBackgroundColor ?? r.moneyChipBackgroundColor);
+    if (msg.type === 'sticker') msg.sticker = r.sticker?.thumbnails?.slice(-1)[0]?.url || '';
+  } else if (msg.type === 'member') {
+    msg.headerText = getTextFromObject(r.headerPrimaryText) || getTextFromObject(r.headerSubtext);
+  }
+  return msg;
+}
+
+export async function getLiveChat(client, continuationToken, { replay = false, offsetMs = 0 } = {}) {
   const result = {
     messages: [],
+    removed: [],
     continuationToken: '',
+    timeoutMs: 0,
     error: '',
   };
 
   try {
-    const data = await client.liveChat(continuationToken);
+    const data = await client.liveChat(continuationToken, { replay, offsetMs });
 
-    const continuationContents = data?.continuationContents?.liveChatContinuation;
-    if (!continuationContents) {
+    const chat = data?.continuationContents?.liveChatContinuation;
+    if (!chat) {
       result.error = 'No chat data available';
       return result;
     }
 
-    const actions = continuationContents.actions || [];
-    for (const action of actions) {
+    const handle = (action, offset) => {
       const item = action.addChatItemAction?.item;
-      if (!item) continue;
-
-      let msg = null;
-      if (item.liveChatTextMessageRenderer) {
-        const render = item.liveChatTextMessageRenderer;
-        msg = {
-          id: render.id,
-          authorName: getTextFromObject(render.authorName),
-          authorIcon: getThumbnailUrlExact(render.authorPhoto?.thumbnails, 32),
-          content: getTextFromObject(render.message),
-          timestamp: render.timestampText ? getTextFromObject(render.timestampText) : '',
-          isOwner: render.authorBadges?.some(b => b.liveChatAuthorBadgeRenderer?.tooltip === 'Owner' || b.liveChatAuthorBadgeRenderer?.customThumbnail),
-        };
+      if (item) {
+        const msg = parseMessage(item, offset);
+        if (msg) result.messages.push(msg);
       }
+      const removed = action.removeChatItemAction?.targetItemId || action.markChatItemAsDeletedAction?.targetItemId;
+      if (removed) result.removed.push(removed);
+    };
 
-      if (msg) result.messages.push(msg);
-    }
-
-    const continuations = continuationContents.continuations || [];
-    for (const cont of continuations) {
-      if (cont.timedContinuationData) {
-        result.continuationToken = cont.timedContinuationData.continuation;
-        result.timeoutMs = cont.timedContinuationData.timeoutMs || 5000;
-      } else if (cont.invalidationContinuationData) {
-         result.continuationToken = cont.invalidationContinuationData.continuation;
-         result.timeoutMs = 5000;
-      } else if (cont.liveChatReplayContinuationData) {
-         result.continuationToken = cont.liveChatReplayContinuationData.continuation;
+    for (const action of chat.actions || []) {
+      if (action.replayChatItemAction) {
+        const offset = Number(action.replayChatItemAction.videoOffsetTimeMsec) || 0;
+        for (const inner of action.replayChatItemAction.actions || []) handle(inner, offset);
+      } else {
+        handle(action, 0);
       }
     }
 
+    for (const cont of chat.continuations || []) {
+      const c = cont.timedContinuationData || cont.invalidationContinuationData
+        || cont.liveChatReplayContinuationData || cont.playerSeekContinuationData;
+      if (!c?.continuation) continue;
+      result.continuationToken = c.continuation;
+      result.timeoutMs = c.timeoutMs || c.timeUntilLastMessageMsec || 0;
+    }
   } catch (e) {
     result.error = e.message;
   }

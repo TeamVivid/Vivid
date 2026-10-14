@@ -49,14 +49,10 @@ router.get('/:id/shorts', async (req, res) => {
 router.get('/:id/playlists', async (req, res) => {
   try {
     const channel = await req.extractor.getChannel(req.params.id);
-    if (channel.playlistTabBrowseId && channel.playlistTabParams) {
-      const result = await req.extractor.loadChannelPlaylists(
-        channel.playlistTabBrowseId, channel.playlistTabParams
-      );
-      res.json(result);
-    } else {
-      res.json({ playlists: [] });
-    }
+    const browseId = channel.playlistTabBrowseId || channel.id || req.params.id;
+    const params = channel.playlistTabParams || 'EglwbGF5bGlzdHPyBgoKCEIGCgIQaCIA';
+    const result = await req.extractor.loadChannelPlaylists(browseId, params);
+    res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

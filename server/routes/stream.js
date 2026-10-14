@@ -21,7 +21,7 @@ const router = Router();
 
 router.get('/:id', async (req, res) => {
   try {
-    const result = await req.extractor.getStreamUrls(req.params.id);
+    const result = await req.extractor.getStreamUrls(req.params.id, req.query);
     res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });

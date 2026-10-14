@@ -17,6 +17,7 @@
  */
 
 import { forceYtDlp, isYtDlpAvailable, getYtDlpInfo } from './ytdlp.js';
+import { hasOAuthFile } from './androidVrAuth.js';
 
 // This file will first try to extract with Innertube, if it fails it will try to use yt-dlp and if that also fails it will try to use ANDROID_REEL (currently only returns progressive streams (like the ANDROID client, but i will still use it because i can))
 
@@ -40,7 +41,21 @@ function buildEmptyResult(videoId) {
     cpn: '',
     error: '',
     usedClient: '',
+    isUpcoming: false,
+    scheduledStartTime: 0,
   };
+}
+
+function parseUpcoming(raw, videoId, usedClient) {
+  if (raw?.playabilityStatus?.status !== 'LIVE_STREAM_OFFLINE') return null;
+  const slate = raw.playabilityStatus.liveStreamability?.liveStreamabilityRenderer?.offlineSlate?.liveStreamOfflineSlateRenderer;
+  const result = buildEmptyResult(videoId);
+  result.usedClient = usedClient;
+  result.playabilityStatus = 'LIVE_STREAM_OFFLINE';
+  result.playabilityReason = raw.playabilityStatus.reason || '';
+  result.isUpcoming = true;
+  result.scheduledStartTime = (Number(slate?.scheduledStartTime) || 0) * 1000;
+  return result;
 }
 
 async function getStreamUrlsViaYtdlp(videoId) {
@@ -53,6 +68,15 @@ async function getStreamUrlsViaYtdlp(videoId) {
   result.isPlayable = true;
   result.isLivestream = !!info.is_live;
   result.duration = info.duration ? Math.round(info.duration * 1000) : 0;
+
+  if (info.is_live) {
+    const hls = (info.formats || [])
+      .filter(f => /m3u8/.test(f.protocol || '') && f.url)
+      .sort((a, b) => (b.acodec !== 'none' && b.vcodec !== 'none') - (a.acodec !== 'none' && a.vcodec !== 'none') || (b.height || 0) - (a.height || 0))[0];
+    if (!hls) throw new Error('yt-dlp returned no HLS format for the livestream');
+    result.hlsManifestUrl = hls.url;
+    return result;
+  }
 
   const formats = (info.formats || []).filter(f => {
     const proto = f.protocol || '';
@@ -255,8 +279,106 @@ function parseInnertubeResult(data, videoId, usedClient) {
   return result;
 }
 
-export async function getStreamUrls(client, videoId) {
+function parseSabrResult(raw, videoId, client) {
+  const result = buildEmptyResult(videoId);
+  result.usedClient = 'SABR';
+  result.playabilityStatus = raw?.playabilityStatus?.status || 'OK';
+  result.playabilityReason = raw?.playabilityStatus?.reason || '';
+  result.isPlayable = result.playabilityStatus === 'OK';
+
+  const sd = raw?.streamingData;
+  if (!sd || !sd.serverAbrStreamingUrl) return null;
+
+  const ustreamerConfig = raw?.playerConfig?.mediaCommonConfig?.mediaUstreamerRequestConfig?.videoPlaybackUstreamerConfig || '';
+
+  result.sabr = {
+    available: true,
+    sabrUrl: sd.serverAbrStreamingUrl,
+    proxyUrl: '/api/v1/proxy/sabr',
+    visitorData: client.visitorData || raw?.responseContext?.visitorData || '',
+    ustreamerConfig,
+    formats: [],
+  };
+
+  const allFormats = sd.adaptiveFormats || [];
+  for (const fmt of allFormats) {
+    const itag = fmt.itag || 0;
+    const mimeType = fmt.mimeType || '';
+    const bitrate = fmt.bitrate || 0;
+    const width = fmt.width || 0;
+    const height = fmt.height || 0;
+    const fps = fmt.fps || 0;
+    const qualityLabel = fmt.qualityLabel || (height ? `${height}p` : '');
+    const lmt = fmt.lastModified ? Number(fmt.lastModified) : 0;
+    const xtags = fmt.xtags || '';
+    if (fmt.isDrc || /drc/i.test(xtags)) continue;
+
+    if (fmt.approxDurationMs) {
+      result.duration = parseInt(fmt.approxDurationMs, 10);
+    }
+
+    const streamInfo = {
+      itag,
+      mimeType,
+      bitrate,
+      width,
+      height,
+      fps,
+      qualityLabel,
+      lmt,
+      xtags,
+      isSabr: true,
+    };
+
+    if (mimeType.startsWith('audio/')) {
+      streamInfo.audioQuality = fmt.audioQuality || '';
+      streamInfo.audioSampleRate = fmt.audioSampleRate || '';
+      streamInfo.audioChannels = fmt.audioChannels || 2;
+      streamInfo.audioTrackId = fmt.audioTrack?.id || '';
+      streamInfo.displayName = fmt.audioTrack?.displayName || '';
+      if (fmt.audioTrack?.audioIsDefault) streamInfo.isDefault = true;
+      if (/original/i.test(streamInfo.displayName)) streamInfo.isOriginal = true;
+      result.audioStreams.push(streamInfo);
+    } else if (mimeType.startsWith('video/')) {
+      result.videoStreams.push(streamInfo);
+    }
+    result.sabr.formats.push(streamInfo);
+  }
+
+  result.audioStreams.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+  result.videoStreams.sort((a, b) => (b.height || 0) - (a.height || 0));
+  result.bestAudio = pickBestAudio(result.audioStreams);
+  result.bestVideo = result.videoStreams[0] || null;
+
+  result.qualityMap = {};
+  const resolutions = [144, 240, 360, 480, 720, 1080, 1440, 2160];
+  for (const stream of result.videoStreams) {
+    const closest = resolutions.reduce((prev, curr) =>
+      Math.abs(curr - stream.height) < Math.abs(prev - stream.height) ? curr : prev
+    );
+    if (!result.qualityMap[closest] || stream.bitrate > result.qualityMap[closest].bitrate) {
+      result.qualityMap[closest] = stream;
+    }
+  }
+
+  return result;
+}
+
+export async function getStreamUrls(client, videoId, options = {}) {
   let lastError = '';
+
+  const trySabr = options?.include_and_try_sabr === true || options?.include_and_try_sabr === 'true';
+  if (trySabr && hasOAuthFile()) {
+    try {
+      const raw = await client.androidVrPlayer(videoId);
+      const sabrResult = raw?.videoDetails?.isLive ? null : parseSabrResult(raw, videoId, client);
+      if (sabrResult && sabrResult.isPlayable && (sabrResult.videoStreams.length || sabrResult.audioStreams.length)) {
+        return sabrResult;
+      }
+    } catch (e) {
+      lastError = `SABR failed: ${e.message}`;
+    }
+  }
 
   if (forceYtDlp()) {
     try {
@@ -273,6 +395,8 @@ export async function getStreamUrls(client, videoId) {
   ]) {
     try {
       const raw = await attempt.fetch();
+      const upcoming = parseUpcoming(raw, videoId, attempt.key);
+      if (upcoming) return upcoming;
       if (isUsableStreamingData(raw)) {
         return parseInnertubeResult(raw, videoId, attempt.key);
       }

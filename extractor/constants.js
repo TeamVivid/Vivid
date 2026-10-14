@@ -57,6 +57,21 @@ export const ANDROID_REEL = {
   apiUrl: API_URL,
 };
 
+export const ANDROID_VR = {
+  clientName: 'ANDROID_VR',
+  clientId: '28',
+  clientVersion: '1.73.21',
+  package: 'com.google.android.apps.youtube.vr.pico',
+  deviceMake: 'Pico',
+  deviceModel: 'A8110',
+  osName: 'Android',
+  osVersion: '10',
+  androidSdkVersion: '29',
+  buildId: '5.13.7',
+  userAgent: 'com.google.android.apps.youtube.vr.pico/1.73.21 (Linux; U; Android 10; en_US; A8110 Build/5.13.7)',
+  apiUrl: 'https://youtubei.googleapis.com/youtubei/v1/',
+};
+
 export const VISIONOS = {
   clientName: 'VISIONOS',
   clientId: '101',

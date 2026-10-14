@@ -40,7 +40,7 @@ class VividExtractor {
   async getVideoDetail(videoId, playlistId) { return getVideoDetail(this.client, videoId, playlistId); }
   async loadMoreSuggestions(token) { return loadMoreSuggestions(this.client, token); }
   async getPlaylist(playlistId) { return getPlaylist(this.client, playlistId); }
-  async getStreamUrls(videoId) { return getStreamUrls(this.client, videoId); }
+  async getStreamUrls(videoId, options = {}) { return getStreamUrls(this.client, videoId, options); }
   async getBestAudioUrl(videoId) { return getBestAudioUrl(this.client, videoId); }
   async getChannel(urlOrId) { return getChannel(this.client, urlOrId); }
   async getChannelStreams(urlOrId) { return getChannelStreams(this.client, urlOrId); }
@@ -53,7 +53,7 @@ class VividExtractor {
   async getCommentReplies(token) { return getCommentReplies(this.client, token); }
   async getCaptionTracks(videoId) { return getCaptionTracks(this.client, videoId); }
   async getCaptionContent(baseUrl, lang) { return getCaptionContent(baseUrl, lang); }
-  async getLiveChat(token) { return livechat.getLiveChat(this.client, token); }
+  async getLiveChat(token, options) { return livechat.getLiveChat(this.client, token, options); }
 }
 
 export default VividExtractor;

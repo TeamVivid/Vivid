@@ -17,13 +17,20 @@
  */
 
 
+import '@fontsource/inter/latin-400.css';
+import '@fontsource/inter/latin-500.css';
+import '@fontsource/inter/latin-600.css';
+import '@fontsource/inter/latin-700.css';
 import { route, handleRoute, navigate } from './router.js';
 import { renderHome } from './pages/home.js';
 import { renderSearch } from './pages/search.js';
 import { renderWatch } from './pages/watch.js';
 import { renderChannel } from './pages/channel.js';
 import { renderPlaylist } from './pages/playlist.js';
+import { renderUserPlaylists } from './pages/userPlaylists.js';
 import { getSearchSuggestions } from './api.js';
+import { applySettings, openSettingsModal, getSettings, saveSettings } from './settings.js';
+import { openAccountModal, updateAuthHeaderBtn, checkAndSyncOnStartup } from './account.js';
 
 if (location.pathname !== '/' && !location.hash) {
   const target = location.pathname + location.search;
@@ -35,20 +42,37 @@ route('/results', renderSearch);
 route('/watch', renderWatch);
 route('/channel/:id', renderChannel);
 route('/playlist', renderPlaylist);
+route('/playlists', renderUserPlaylists);
 
 
 window.addEventListener('hashchange', handleRoute);
 window.addEventListener('DOMContentLoaded', () => {
-  
-  const saved = localStorage.getItem('vivid-theme');
-  if (saved === 'light') document.documentElement.setAttribute('data-theme', 'light');
+  fetch('/api/v1').then(r => r.json()).then(info => {
+    const el = document.getElementById('footer-version');
+    if (el) el.textContent = info.behind ? `${info.version} (${info.behind} behind)` : info.version;
+  }).catch(() => {});
+  applySettings();
+  checkAndSyncOnStartup();
+  updateAuthHeaderBtn();
 
-  document.getElementById('theme-toggle').addEventListener('click', () => {
-    const current = document.documentElement.getAttribute('data-theme');
-    const next = current === 'light' ? 'dark' : 'light';
-    document.documentElement.setAttribute('data-theme', next === 'dark' ? '' : 'light');
-    localStorage.setItem('vivid-theme', next);
-  });
+  const themeToggle = document.getElementById('theme-toggle');
+  if (themeToggle) {
+    themeToggle.addEventListener('click', () => {
+      const s = getSettings();
+      const nextTheme = s.theme === 'light' ? 'dark' : 'light';
+      saveSettings({ ...s, theme: nextTheme });
+    });
+  }
+
+  const settingsBtn = document.getElementById('settings-btn');
+  if (settingsBtn) {
+    settingsBtn.addEventListener('click', () => openSettingsModal());
+  }
+
+  const accountBtn = document.getElementById('account-btn');
+  if (accountBtn) {
+    accountBtn.addEventListener('click', () => openAccountModal());
+  }
 
   
   const searchForm = document.getElementById('search-form');
@@ -109,16 +133,33 @@ window.addEventListener('DOMContentLoaded', () => {
       }
     });
 
-  document.getElementById('logo-link').addEventListener('click', (e) => {
-    e.preventDefault();
-    navigate('/');
-  });
+  const logoLink = document.getElementById('logo-link');
+  if (logoLink) {
+    logoLink.addEventListener('click', (e) => {
+      if (e.ctrlKey || e.metaKey) {
+        window.open(window.location.origin + window.location.pathname, '_blank');
+        return;
+      }
+      e.preventDefault();
+      navigate('/');
+    });
+  }
 
-  
-  document.getElementById('nav-home').addEventListener('click', (e) => {
-    e.preventDefault();
-    navigate('/');
-  });
+  const navHome = document.getElementById('nav-home');
+  if (navHome) {
+    navHome.addEventListener('click', (e) => {
+      e.preventDefault();
+      navigate('/');
+    });
+  }
+
+  const navPlaylists = document.getElementById('nav-playlists');
+  if (navPlaylists) {
+    navPlaylists.addEventListener('click', (e) => {
+      e.preventDefault();
+      navigate('/playlists');
+    });
+  }
 
   handleRoute();
 });

@@ -181,24 +181,57 @@ import { getTextFromObject, parseSuccinctVideo, parseSuccinctPlaylist, getThumbn
       const match = url.match(/\/shorts\/([a-zA-Z0-9_-]+)/);
       if (match) videoId = match[1];
     }
+    if (!videoId && shortsData?.entityId) {
+      const match = shortsData.entityId.match(/([a-zA-Z0-9_-]{11})/);
+      if (match) videoId = match[1];
+    }
+    if (!videoId && shortsData?.inlinePlayerData?.playbackEndpoint?.reelWatchEndpoint?.videoId) {
+      videoId = shortsData.inlinePlayerData.playbackEndpoint.reelWatchEndpoint.videoId;
+    }
 
     const overlay = shortsData.overlayMetadata || {};
+    let title = overlay?.primaryText?.content || '';
+    if (!title && shortsData.accessibilityText) {
+      title = shortsData.accessibilityText
+        .replace(/\s*-\s*play\s*short.*$/i, '')
+        .replace(/,\s*[\d.,]+\s*(?:views|Aufrufe|vues|visualizaciones|thousand|million|billion|K|M|B).*$/i, '')
+        .trim();
+    }
+    if (!title && shortsData.headline?.content) {
+      title = shortsData.headline.content;
+    }
+    if (!title && shortsData.accessibility?.accessibilityData?.label) {
+      title = shortsData.accessibility.accessibilityData.label
+        .replace(/\s*-\s*play\s*short.*$/i, '')
+        .replace(/,\s*[\d.,]+\s*(?:views|Aufrufe|vues|visualizaciones|thousand|million|billion|K|M|B).*$/i, '')
+        .trim();
+    }
+
+    let views = overlay?.secondaryText?.content || '';
+    if (!views && shortsData.accessibilityText) {
+      const m = shortsData.accessibilityText.match(/([\d.,]+\s*(?:thousand|million|billion|K|M|B)?\s*views)/i);
+      if (m) views = m[1];
+    }
+
     let thumbnailUrl = '';
     const sources = shortsData?.thumbnail?.sources || [];
     if (sources.length > 0) {
-      let originalUrl = sources[0].url || '';
+      let originalUrl = sources[sources.length - 1].url || sources[0].url || '';
       originalUrl = convertWebpThumbnailToJpg(originalUrl);
       const id = getVideoIdFromThumbnailUrl(originalUrl);
       thumbnailUrl = id ? getVideoThumbnailUrl(id) : originalUrl;
+    }
+    if (!thumbnailUrl && videoId) {
+      thumbnailUrl = getVideoThumbnailUrl(videoId);
     }
 
     return {
       type: 'video',
       videoId,
       url: videoId ? `/watch?v=${videoId}` : '',
-      title: overlay?.primaryText?.content || '',
-      views: overlay?.secondaryText?.content || '',
-      duration: '',
+      title: title || 'Short',
+      views,
+      duration: 'Short',
       author: channelName,
       thumbnailUrl,
       isShort: true,
@@ -278,34 +311,72 @@ import { getTextFromObject, parseSuccinctVideo, parseSuccinctPlaylist, getThumbn
     }
   }
 
+  function parseChannelPlaylistItem(item) {
+    if (!item) return null;
+    if (item.compactPlaylistRenderer) return parseSuccinctPlaylist(item.compactPlaylistRenderer);
+    if (item.playlistRenderer) return parseSuccinctPlaylist(item.playlistRenderer);
+    if (item.lockupViewModel) {
+      const lm = item.lockupViewModel;
+      const title = lm.metadata?.lockupMetadataViewModel?.title?.content || '';
+      const id = (lm.contentId || '').replace(/^VL/, '');
+      const badge = lm.contentImage?.thumbnailViewModel?.overlays?.[0]?.thumbnailBottomOverlayViewModel?.badges?.[0]?.thumbnailBadgeViewModel?.text || '';
+      const sources = lm.contentImage?.thumbnailViewModel?.image?.sources || [];
+      const thumb = sources.length ? (sources[sources.length - 1].url || '') : '';
+      let url = lm.rendererContext?.commandContext?.onTap?.innertubeCommand?.commandMetadata?.webCommandMetadata?.url || '';
+      if (!url && id) url = `/playlist?list=${id}`;
+      return {
+        type: 'playlist',
+        id,
+        url,
+        title,
+        videoCount: badge,
+        thumbnailUrl: thumb,
+      };
+    }
+    return null;
+  }
+
   export async function loadChannelPlaylists(client, browseId, params) {
     try {
-      const data = await client.browse(browseId, params);
+      const p = params || 'EglwbGF5bGlzdHPyBgoKCEIGCgIQaCIA';
+      const data = await client.browse(browseId, p);
       const playlists = [];
 
-      const tabs = data?.contents?.singleColumnBrowseResultsRenderer?.tabs || [];
+      const tabs = data?.contents?.singleColumnBrowseResultsRenderer?.tabs || data?.contents?.twoColumnBrowseResultsRenderer?.tabs || [];
       for (const tab of tabs) {
         const sections = tab?.tabRenderer?.content?.sectionListRenderer?.contents || [];
         for (const section of sections) {
           if (section.shelfRenderer) {
-            const categoryName = getTextFromObject(section.shelfRenderer.title);
+            const categoryName = getTextFromObject(section.shelfRenderer.title) || 'Playlists';
             const categoryPlaylists = [];
-            for (const item of section.shelfRenderer?.content?.verticalListRenderer?.items || []) {
-              if (item.compactPlaylistRenderer) {
-                categoryPlaylists.push(parseSuccinctPlaylist(item.compactPlaylistRenderer));
-              }
+            const shelfItems = section.shelfRenderer?.content?.verticalListRenderer?.items ||
+                               section.shelfRenderer?.content?.gridRenderer?.items ||
+                               section.shelfRenderer?.content?.horizontalListRenderer?.items || [];
+            for (const item of shelfItems) {
+              const parsed = parseChannelPlaylistItem(item);
+              if (parsed) categoryPlaylists.push(parsed);
             }
             if (categoryPlaylists.length) playlists.push({ category: categoryName, items: categoryPlaylists });
           }
           if (section.itemSectionRenderer) {
             const items = [];
             for (const item of section.itemSectionRenderer.contents || []) {
-              if (item.compactPlaylistRenderer) {
-                items.push(parseSuccinctPlaylist(item.compactPlaylistRenderer));
-              }
+              const parsed = parseChannelPlaylistItem(item);
+              if (parsed) items.push(parsed);
             }
             if (items.length) playlists.push({ category: 'Playlists', items });
           }
+        }
+
+        const richItems = tab?.tabRenderer?.content?.richGridRenderer?.contents || [];
+        if (richItems.length) {
+          const items = [];
+          for (const item of richItems) {
+            const content = item?.richItemRenderer?.content;
+            const parsed = parseChannelPlaylistItem(content || item);
+            if (parsed) items.push(parsed);
+          }
+          if (items.length) playlists.push({ category: 'Playlists', items });
         }
       }
 

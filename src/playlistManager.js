@@ -16,7 +16,6 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-// unused for now
 
 const STORAGE_KEY = 'vivid_playlists';
 
@@ -25,8 +24,11 @@ export function getPlaylists() {
   return data ? JSON.parse(data) : [];
 }
 
-export function savePlaylists(playlists) {
+export function savePlaylists(playlists, doSync = true) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(playlists));
+  if (doSync) {
+    syncWithServer();
+  }
 }
 
 export function createPlaylist(name) {
@@ -52,8 +54,17 @@ export function addVideoToPlaylist(playlistId, video) {
   const playlists = getPlaylists();
   const playlist = playlists.find(p => p.id === playlistId);
   if (playlist) {
-    if (!playlist.videos.some(v => v.videoId === video.videoId)) {
-      playlist.videos.push(video);
+    if (!playlist.videos.some(v => (v.videoId || v.id) === (video.videoId || video.id))) {
+      playlist.videos.push({
+        videoId: video.videoId || video.id,
+        id: video.videoId || video.id,
+        title: video.title || '',
+        author: video.author || video.authorName || '',
+        authorName: video.author || video.authorName || '',
+        duration: video.duration || '',
+        thumbnailUrl: video.thumbnailUrl || '',
+        addedAt: new Date().toISOString(),
+      });
       savePlaylists(playlists);
     }
   }
@@ -63,7 +74,7 @@ export function removeVideoFromPlaylist(playlistId, videoId) {
   const playlists = getPlaylists();
   const playlist = playlists.find(p => p.id === playlistId);
   if (playlist) {
-    playlist.videos = playlist.videos.filter(v => v.videoId !== videoId);
+    playlist.videos = playlist.videos.filter(v => (v.videoId || v.id) !== videoId);
     savePlaylists(playlists);
   }
 }
@@ -71,5 +82,33 @@ export function removeVideoFromPlaylist(playlistId, videoId) {
 export function isVideoInPlaylist(playlistId, videoId) {
   const playlists = getPlaylists();
   const playlist = playlists.find(p => p.id === playlistId);
-  return playlist ? playlist.videos.some(v => v.videoId === videoId) : false;
+  return playlist ? playlist.videos.some(v => (v.videoId || v.id) === videoId) : false;
+}
+
+export async function syncWithServer() {
+  const token = localStorage.getItem('vivid_auth_token');
+  if (!token) return;
+  try {
+    const playlists = getPlaylists();
+    const subs = JSON.parse(localStorage.getItem('vivid_subs') || '[]');
+    const res = await fetch('/api/v1/auth/sync', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ subscriptions: subs, playlists })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.user) {
+        if (data.user.subscriptions) {
+          localStorage.setItem('vivid_subs', JSON.stringify(data.user.subscriptions));
+        }
+        if (data.user.playlists) {
+          savePlaylists(data.user.playlists, false);
+        }
+      }
+    }
+  } catch {}
 }

@@ -18,6 +18,7 @@
 
 import { searchVideos, proxyImageUrl } from '../api.js';
 import { escapeHtml, navigate } from '../router.js';
+import { getSettings } from '../settings.js';
 import { videoCard } from './home.js';
 
 export async function renderSearch(app, params) {
@@ -43,6 +44,7 @@ export async function renderSearch(app, params) {
 
   const results = data.results || [];
   let continuationToken = data.continuationToken || '';
+  const isListLayout = getSettings().layoutStyle === 'list';
 
   app.innerHTML = `
     <h1 class="page-title">
@@ -55,8 +57,8 @@ export async function renderSearch(app, params) {
     </div>
     <div id="results-container">
       ${results.length === 0 ? '<p style="color:var(--text-muted);padding:2rem;text-align:center">No results found</p>' : ''}
-      <div class="video-list" id="results-list">
-        ${results.map(r => renderResult(r)).join('')}
+      <div class="${isListLayout ? 'video-list' : 'video-grid'}" id="results-list">
+        ${results.map(r => renderResult(r, isListLayout)).join('')}
       </div>
     </div>
     ${continuationToken ? '<button class="load-more" id="load-more-search">Load more</button>' : ''}
@@ -91,7 +93,7 @@ export async function renderSearch(app, params) {
         const more = await searchVideos(query, filters, continuationToken);
         const list = document.getElementById('results-list');
         for (const r of more.results || []) {
-          list.insertAdjacentHTML('beforeend', renderResult(r));
+          list.insertAdjacentHTML('beforeend', renderResult(r, isListLayout));
         }
         continuationToken = more.continuationToken || '';
         if (!continuationToken) loadMoreBtn.remove();
@@ -148,31 +150,11 @@ function renderFilters(query, current) {
   `;
 }
 
-function renderResult(item) {
+function renderResult(item, isList = true) {
   if (!item) return '';
   if (item.type === 'channel') return renderChannelResult(item);
-  if (item.type === 'playlist') return renderPlaylistResult(item);
-  return renderVideoResult(item);
-}
-
-function renderVideoResult(v) {
-  const href = v.url || (v.videoId ? `/watch?v=${v.videoId}` : '#');
-  return `
-    <a href="#${href}" class="video-list-item">
-      <div class="video-list-thumb">
-        <img src="${proxyImageUrl(v.thumbnailUrl || '')}" alt="" loading="lazy">
-        ${v.duration ? `<span class="video-card-duration">${escapeHtml(v.duration)}</span>` : ''}
-      </div>
-      <div class="video-list-info">
-        <div class="video-list-title">${escapeHtml(v.title || '')}</div>
-        <div class="video-list-meta">
-          ${v.author ? `<span>${escapeHtml(v.author)}</span>` : ''}
-          ${v.views ? `<span>${escapeHtml(v.views)}</span>` : ''}
-          ${v.publishDate ? `<span>${escapeHtml(v.publishDate)}</span>` : ''}
-        </div>
-      </div>
-    </a>
-  `;
+  if (item.type === 'playlist') return renderPlaylistResult(item, isList);
+  return videoCard(item, isList);
 }
 
 function renderChannelResult(ch) {
@@ -190,12 +172,30 @@ function renderChannelResult(ch) {
   `;
 }
 
-function renderPlaylistResult(pl) {
+function renderPlaylistResult(pl, isList = true) {
   const href = pl.url || '#';
+  let thumb = pl.thumbnailUrl || '';
+  if (thumb.includes('/default.jpg')) thumb = thumb.replace('/default.jpg', '/hqdefault.jpg');
+  if (!isList) {
+    return `
+      <div class="video-card">
+        <a href="#${href}" class="video-card-link">
+          <div class="video-card-thumb">
+            <img src="${proxyImageUrl(thumb)}" alt="" loading="lazy">
+            <span class="video-card-duration">▶ ${escapeHtml(pl.videoCount || '')}</span>
+          </div>
+          <div class="video-card-info">
+            <div class="video-card-title">${escapeHtml(pl.title || '')}</div>
+            <div class="video-card-meta"><span>Playlist</span></div>
+          </div>
+        </a>
+      </div>
+    `;
+  }
   return `
     <a href="#${href}" class="video-list-item">
       <div class="video-list-thumb">
-        <img src="${proxyImageUrl(pl.thumbnailUrl || '')}" alt="" loading="lazy">
+        <img src="${proxyImageUrl(thumb)}" alt="" loading="lazy">
         <span class="video-card-duration">▶ ${escapeHtml(pl.videoCount || '')}</span>
       </div>
       <div class="video-list-info">

@@ -4,7 +4,7 @@ A privacy focused alternative YouTube frontend inspired by Invidious and Nitter
 
 ## Instances
 
-- [Official Instance](https://vivid.errexe.xyz/)
+- [Official Public Instance](https://vivid.errexe.xyz/)
 
 ## Self Hosting
 

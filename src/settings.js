@@ -1,0 +1,279 @@
+/*
+ * Vivid - A privacy focused alternative YouTube frontend inspired by Invidious and Nitter
+ * Copyright (C) 2026  TheErrorExe, zUnpaid
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+
+export const THEMES = [
+  { id: 'dark', name: 'Dark (Default)' },
+  { id: 'oled', name: 'OLED Pure Black' },
+  { id: 'dracula', name: 'Dracula' },
+  { id: 'nord', name: 'Nord' },
+  { id: 'catppuccin', name: 'Catppuccin Mocha' },
+  { id: 'cyberpunk', name: 'Cyberpunk' },
+  { id: 'light', name: 'Light' },
+];
+
+export const SPONSOR_CATEGORIES = {
+  sponsor: { name: 'Sponsor', defaultBehavior: 'skip_show', color: '#00d400' },
+  intro: { name: 'Intermission / Intro', defaultBehavior: 'skip_show', color: '#00d8d8' },
+  outro: { name: 'Outro / Endcards', defaultBehavior: 'skip_show', color: '#5c6bc0' },
+  interaction: { name: 'Interaction Reminder', defaultBehavior: 'show_only', color: '#ec407a' },
+  selfpromo: { name: 'Self-promotion', defaultBehavior: 'skip_show', color: '#ffd54f' },
+  music_offtopic: { name: 'Non-music Section', defaultBehavior: 'show_only', color: '#ff9800' },
+  preview: { name: 'Preview / Recap', defaultBehavior: 'show_only', color: '#29b6f6' },
+};
+
+export const DEFAULT_SETTINGS = {
+  theme: 'dark',
+  layoutStyle: 'list',
+  uiScale: 'normal',
+  defaultQuality: 'auto',
+  autoplay: true,
+  loopVideo: false,
+  trySabr: true,
+  sponsorBlockEnabled: true,
+  sponsorCategories: {
+    sponsor: 'skip_show',
+    intro: 'skip_show',
+    outro: 'skip_show',
+    interaction: 'show_only',
+    selfpromo: 'skip_show',
+    music_offtopic: 'show_only',
+    preview: 'show_only',
+  }
+};
+
+const SETTINGS_KEY = 'vivid_settings';
+
+export function getSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return { ...DEFAULT_SETTINGS };
+    const parsed = JSON.parse(raw);
+    return {
+      ...DEFAULT_SETTINGS,
+      ...parsed,
+      sponsorCategories: {
+        ...DEFAULT_SETTINGS.sponsorCategories,
+        ...(parsed.sponsorCategories || {})
+      }
+    };
+  } catch {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+export function saveSettings(settings) {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    localStorage.setItem('vivid-theme', settings.theme);
+  } catch {}
+  applySettings(settings);
+  window.dispatchEvent(new CustomEvent('vivid-settings-changed', { detail: settings }));
+}
+
+export function applySettings(settings = getSettings()) {
+  const root = document.documentElement;
+  root.setAttribute('data-theme', settings.theme);
+  root.setAttribute('data-scale', settings.uiScale);
+  root.setAttribute('data-layout', settings.layoutStyle);
+}
+
+export function openSettingsModal() {
+  const existing = document.getElementById('settings-modal');
+  if (existing) existing.remove();
+
+  const settings = getSettings();
+
+  const modal = document.createElement('div');
+  modal.id = 'settings-modal';
+  modal.className = 'modal-backdrop';
+
+  modal.innerHTML = `
+    <div class="modal-box" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <h2 class="modal-title">Settings</h2>
+        <button class="modal-close-btn" id="modal-close-btn" aria-label="Close settings">&times;</button>
+      </div>
+
+      <div class="modal-tabs">
+        <button class="modal-tab active" data-tab="tab-appearance">Appearance</button>
+        <button class="modal-tab" data-tab="tab-playback">Playback & SABR</button>
+        <button class="modal-tab" data-tab="tab-sponsorblock">SponsorBlock</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="settings-tab-pane active" id="tab-appearance">
+          <div class="setting-item">
+            <div class="setting-info">
+              <label class="setting-label">Theme</label>
+              <div class="setting-desc">Choose your visual color theme</div>
+            </div>
+            <select id="setting-theme" class="setting-select">
+              ${THEMES.map(t => `<option value="${t.id}" ${settings.theme === t.id ? 'selected' : ''}>${t.name}</option>`).join('')}
+            </select>
+          </div>
+
+          <div class="setting-item">
+            <div class="setting-info">
+              <label class="setting-label">Results Layout</label>
+              <div class="setting-desc">Display video cards vertically (Grid) or horizontally (List)</div>
+            </div>
+            <select id="setting-layout" class="setting-select">
+              <option value="grid" ${settings.layoutStyle === 'grid' ? 'selected' : ''}>Vertical Grid</option>
+              <option value="list" ${settings.layoutStyle === 'list' ? 'selected' : ''}>Horizontal List</option>
+            </select>
+          </div>
+
+          <div class="setting-item">
+            <div class="setting-info">
+              <label class="setting-label">UI Sizing</label>
+              <div class="setting-desc">Scale UI size, cards, and thumbnails</div>
+            </div>
+            <select id="setting-scale" class="setting-select">
+              <option value="normal" ${settings.uiScale === 'normal' ? 'selected' : ''}>Standard</option>
+              <option value="large" ${settings.uiScale === 'large' ? 'selected' : ''}>Large (Comfortable)</option>
+              <option value="xlarge" ${settings.uiScale === 'xlarge' ? 'selected' : ''}>Extra Large</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="settings-tab-pane" id="tab-playback">
+          <div class="setting-item">
+            <div class="setting-info">
+              <label class="setting-label">Default Quality</label>
+              <div class="setting-desc">Preferred video stream resolution</div>
+            </div>
+            <select id="setting-quality" class="setting-select">
+              <option value="auto" ${settings.defaultQuality === 'auto' ? 'selected' : ''}>Auto</option>
+              <option value="1080" ${settings.defaultQuality === '1080' ? 'selected' : ''}>1080p</option>
+              <option value="720" ${settings.defaultQuality === '720' ? 'selected' : ''}>720p</option>
+              <option value="480" ${settings.defaultQuality === '480' ? 'selected' : ''}>480p</option>
+              <option value="360" ${settings.defaultQuality === '360' ? 'selected' : ''}>360p</option>
+            </select>
+          </div>
+
+          <div class="setting-item">
+            <div class="setting-info">
+              <label class="setting-label">Autoplay Next Video</label>
+              <div class="setting-desc">Automatically play the next suggestion when video ends</div>
+            </div>
+            <label class="setting-switch">
+              <input type="checkbox" id="setting-autoplay" ${settings.autoplay ? 'checked' : ''}>
+              <span class="setting-slider"></span>
+            </label>
+          </div>
+
+          <div class="setting-item">
+            <div class="setting-info">
+              <label class="setting-label">Enable SABR Streaming</label>
+              <div class="setting-desc">Use client-side SABR decoding for adaptive streams when available</div>
+            </div>
+            <label class="setting-switch">
+              <input type="checkbox" id="setting-sabr" ${settings.trySabr ? 'checked' : ''}>
+              <span class="setting-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="settings-tab-pane" id="tab-sponsorblock">
+          <div class="setting-item">
+            <div class="setting-info">
+              <label class="setting-label">Enable SponsorBlock</label>
+              <div class="setting-desc">Show colored segments and skip sponsored sections</div>
+            </div>
+            <label class="setting-switch">
+              <input type="checkbox" id="setting-sponsor-enabled" ${settings.sponsorBlockEnabled ? 'checked' : ''}>
+              <span class="setting-slider"></span>
+            </label>
+          </div>
+
+          <div class="sponsor-categories-header">
+            <span>Segment Category</span>
+            <span>Action</span>
+          </div>
+
+          <div class="sponsor-categories-list">
+            ${Object.entries(SPONSOR_CATEGORIES).map(([key, cat]) => {
+              const currentVal = settings.sponsorCategories[key] || cat.defaultBehavior;
+              return `
+                <div class="sponsor-cat-row">
+                  <div class="sponsor-cat-info">
+                    <span class="sponsor-color-indicator" style="background:${cat.color}"></span>
+                    <span>${cat.name}</span>
+                  </div>
+                  <select class="setting-select sponsor-cat-select" data-category="${key}">
+                    <option value="skip_show" ${currentVal === 'skip_show' ? 'selected' : ''}>Skip & Show</option>
+                    <option value="show_only" ${currentVal === 'show_only' ? 'selected' : ''}>Show only</option>
+                    <option value="disabled" ${currentVal === 'disabled' ? 'selected' : ''}>Disabled</option>
+                  </select>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button id="modal-cancel-btn" class="modal-btn-secondary">Cancel</button>
+        <button id="modal-save-btn" class="modal-btn-primary">Save & Apply</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  const close = () => modal.remove();
+  modal.querySelector('#modal-close-btn').addEventListener('click', close);
+  modal.querySelector('#modal-cancel-btn')?.addEventListener('click', close);
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) close();
+  });
+
+  const tabButtons = modal.querySelectorAll('.modal-tab');
+  const tabPanes = modal.querySelectorAll('.settings-tab-pane');
+  tabButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      tabButtons.forEach(b => b.classList.remove('active'));
+      tabPanes.forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      const target = modal.querySelector(`#${btn.dataset.tab}`);
+      if (target) target.classList.add('active');
+    });
+  });
+
+  modal.querySelector('#modal-save-btn').addEventListener('click', () => {
+    const updated = {
+      theme: modal.querySelector('#setting-theme').value,
+      layoutStyle: modal.querySelector('#setting-layout').value,
+      uiScale: modal.querySelector('#setting-scale').value,
+      defaultQuality: modal.querySelector('#setting-quality').value,
+      autoplay: modal.querySelector('#setting-autoplay').checked,
+      loopVideo: settings.loopVideo,
+      trySabr: modal.querySelector('#setting-sabr').checked,
+      sponsorBlockEnabled: modal.querySelector('#setting-sponsor-enabled').checked,
+      sponsorCategories: {}
+    };
+
+    modal.querySelectorAll('.sponsor-cat-select').forEach(sel => {
+      updated.sponsorCategories[sel.dataset.category] = sel.value;
+    });
+
+    saveSettings(updated);
+    close();
+  });
+}
