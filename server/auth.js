@@ -153,6 +153,26 @@ export function logoutUser(token) {
   }
 }
 
+export function deleteUser(token, password) {
+  if (!token) throw new Error('Unauthorized');
+  const db = loadDb();
+  const session = db.sessions[token];
+  if (!session) throw new Error('Unauthorized');
+  const user = db.users[session.username];
+  if (!user) throw new Error('User not found');
+
+  const hash = hashPassword(String(password || ''), user.salt);
+  if (!crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(user.hash, 'hex'))) {
+    throw new Error('Invalid password');
+  }
+
+  delete db.users[user.username];
+  for (const [t, s] of Object.entries(db.sessions)) {
+    if (s.username === user.username) delete db.sessions[t];
+  }
+  saveDb(db);
+}
+
 export function syncUserData(token, { subscriptions = [], playlists = [] }) {
   if (!token) throw new Error('Unauthorized');
   const db = loadDb();

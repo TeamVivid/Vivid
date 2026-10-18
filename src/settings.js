@@ -35,16 +35,20 @@ export const SPONSOR_CATEGORIES = {
   selfpromo: { name: 'Self-promotion', defaultBehavior: 'skip_show', color: '#ffd54f' },
   music_offtopic: { name: 'Non-music Section', defaultBehavior: 'show_only', color: '#ff9800' },
   preview: { name: 'Preview / Recap', defaultBehavior: 'show_only', color: '#29b6f6' },
+  filler: { name: 'Filler Tangent / Jokes', defaultBehavior: 'show_only', color: '#7300ff' },
+  poi_highlight: { name: 'Highlight / Point of Interest', defaultBehavior: 'show_only', color: '#ff1493' },
 };
 
 export const DEFAULT_SETTINGS = {
   theme: 'dark',
-  layoutStyle: 'list',
+  layoutStyle: 'grid',
   uiScale: 'normal',
   defaultQuality: 'auto',
   autoplay: true,
   loopVideo: false,
   trySabr: true,
+  disablePopularHome: false,
+  showShortsInResults: false,
   sponsorBlockEnabled: true,
   sponsorCategories: {
     sponsor: 'skip_show',
@@ -54,6 +58,8 @@ export const DEFAULT_SETTINGS = {
     selfpromo: 'skip_show',
     music_offtopic: 'show_only',
     preview: 'show_only',
+    filler: 'show_only',
+    poi_highlight: 'show_only',
   }
 };
 
@@ -64,9 +70,14 @@ export function getSettings() {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
     const parsed = JSON.parse(raw);
+    const hasCustomLayout = parsed.customLayout === true || localStorage.getItem('vivid_custom_layout') === 'true';
+    const layoutStyle = hasCustomLayout && (parsed.layoutStyle === 'list' || parsed.layoutStyle === 'grid')
+      ? parsed.layoutStyle
+      : 'grid';
     return {
       ...DEFAULT_SETTINGS,
       ...parsed,
+      layoutStyle,
       sponsorCategories: {
         ...DEFAULT_SETTINGS.sponsorCategories,
         ...(parsed.sponsorCategories || {})
@@ -79,6 +90,9 @@ export function getSettings() {
 
 export function saveSettings(settings) {
   try {
+    if (settings.customLayout) {
+      localStorage.setItem('vivid_custom_layout', 'true');
+    }
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
     localStorage.setItem('vivid-theme', settings.theme);
   } catch {}
@@ -134,7 +148,7 @@ export function openSettingsModal() {
               <div class="setting-desc">Display video cards vertically (Grid) or horizontally (List)</div>
             </div>
             <select id="setting-layout" class="setting-select">
-              <option value="grid" ${settings.layoutStyle === 'grid' ? 'selected' : ''}>Vertical Grid</option>
+              <option value="grid" ${settings.layoutStyle === 'grid' ? 'selected' : ''}>Vertical Grid (Default)</option>
               <option value="list" ${settings.layoutStyle === 'list' ? 'selected' : ''}>Horizontal List</option>
             </select>
           </div>
@@ -149,6 +163,28 @@ export function openSettingsModal() {
               <option value="large" ${settings.uiScale === 'large' ? 'selected' : ''}>Large (Comfortable)</option>
               <option value="xlarge" ${settings.uiScale === 'xlarge' ? 'selected' : ''}>Extra Large</option>
             </select>
+          </div>
+
+          <div class="setting-item">
+            <div class="setting-info">
+              <label class="setting-label">Disable Popular on Home</label>
+              <div class="setting-desc">Do not show popular/trending videos on the home page</div>
+            </div>
+            <label class="setting-switch">
+              <input type="checkbox" id="setting-disable-popular" ${settings.disablePopularHome ? 'checked' : ''}>
+              <span class="setting-slider"></span>
+            </label>
+          </div>
+
+          <div class="setting-item">
+            <div class="setting-info">
+              <label class="setting-label">Shorts in Search Results</label>
+              <div class="setting-desc">Show the Shorts shelf and Shorts filter on the results page</div>
+            </div>
+            <label class="setting-switch">
+              <input type="checkbox" id="setting-shorts-results" ${settings.showShortsInResults ? 'checked' : ''}>
+              <span class="setting-slider"></span>
+            </label>
           </div>
         </div>
 
@@ -260,11 +296,14 @@ export function openSettingsModal() {
     const updated = {
       theme: modal.querySelector('#setting-theme').value,
       layoutStyle: modal.querySelector('#setting-layout').value,
+      customLayout: true,
       uiScale: modal.querySelector('#setting-scale').value,
       defaultQuality: modal.querySelector('#setting-quality').value,
       autoplay: modal.querySelector('#setting-autoplay').checked,
       loopVideo: settings.loopVideo,
       trySabr: modal.querySelector('#setting-sabr').checked,
+      disablePopularHome: modal.querySelector('#setting-disable-popular')?.checked ?? false,
+      showShortsInResults: modal.querySelector('#setting-shorts-results')?.checked ?? false,
       sponsorBlockEnabled: modal.querySelector('#setting-sponsor-enabled').checked,
       sponsorCategories: {}
     };

@@ -28,6 +28,7 @@ import { renderWatch } from './pages/watch.js';
 import { renderChannel } from './pages/channel.js';
 import { renderPlaylist } from './pages/playlist.js';
 import { renderUserPlaylists } from './pages/userPlaylists.js';
+import { renderPrivacy } from './pages/privacy.js';
 import { getSearchSuggestions } from './api.js';
 import { applySettings, openSettingsModal, getSettings, saveSettings } from './settings.js';
 import { openAccountModal, updateAuthHeaderBtn, checkAndSyncOnStartup } from './account.js';
@@ -43,6 +44,7 @@ route('/watch', renderWatch);
 route('/channel/:id', renderChannel);
 route('/playlist', renderPlaylist);
 route('/playlists', renderUserPlaylists);
+route('/privacy', renderPrivacy);
 
 
 window.addEventListener('hashchange', handleRoute);
@@ -50,10 +52,35 @@ window.addEventListener('DOMContentLoaded', () => {
   fetch('/api/v1').then(r => r.json()).then(info => {
     const el = document.getElementById('footer-version');
     if (el) el.textContent = info.behind ? `${info.version} (${info.behind} behind)` : info.version;
+    const privacyLink = document.getElementById('footer-privacy');
+    if (privacyLink && info.privacyPolicyUrl) {
+      privacyLink.href = info.privacyPolicyUrl;
+      privacyLink.target = '_blank';
+      privacyLink.rel = 'noopener';
+    }
   }).catch(() => {});
   applySettings();
   checkAndSyncOnStartup();
   updateAuthHeaderBtn();
+
+  const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+  const headerNav = document.getElementById('header-nav');
+  if (mobileMenuBtn && headerNav) {
+    mobileMenuBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      headerNav.classList.toggle('mobile-open');
+    });
+    document.addEventListener('click', (e) => {
+      if (!headerNav.contains(e.target) && !mobileMenuBtn.contains(e.target)) {
+        headerNav.classList.remove('mobile-open');
+      }
+    });
+    headerNav.querySelectorAll('.nav-link').forEach(link => {
+      link.addEventListener('click', () => {
+        headerNav.classList.remove('mobile-open');
+      });
+    });
+  }
 
   const themeToggle = document.getElementById('theme-toggle');
   if (themeToggle) {

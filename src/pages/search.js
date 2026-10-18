@@ -19,7 +19,7 @@
 import { searchVideos, proxyImageUrl } from '../api.js';
 import { escapeHtml, navigate } from '../router.js';
 import { getSettings } from '../settings.js';
-import { videoCard } from './home.js';
+import { videoCard, verifiedBadge } from './home.js';
 
 export async function renderSearch(app, params) {
   const query = params.search_query || params.q || '';
@@ -33,6 +33,7 @@ export async function renderSearch(app, params) {
     type: params.type || '',
     date: params.date || '',
     duration: params.duration || '',
+    features: params.features || '',
   };
   document.title = `${query} - Vivid`;
   const data = await searchVideos(query, filters);
@@ -42,7 +43,8 @@ export async function renderSearch(app, params) {
     return;
   }
 
-  const results = data.results || [];
+  const showShorts = getSettings().showShortsInResults;
+  const results = (data.results || []).filter(r => showShorts || r.type !== 'shorts');
   let continuationToken = data.continuationToken || '';
   const isListLayout = getSettings().layoutStyle === 'list';
 
@@ -51,7 +53,8 @@ export async function renderSearch(app, params) {
       Search: "${escapeHtml(query)}"
       <span class="page-subtitle">${data.estimatedResults ? ` ${escapeHtml(data.estimatedResults)} results` : ''}</span>
     </h1>
-    <button id="toggle-filters-btn" style="margin-bottom:1rem;background:var(--bg-card);border:1px solid var(--border-color);color:var(--text-main);padding:4px 12px;border-radius:16px;">Toggle Filters</button>
+    <div class="search-chips">${renderChips(query, filters, showShorts)}</div>
+    <button id="toggle-filters-btn" class="search-chip" style="margin-bottom:1rem;cursor:pointer;">Toggle Filters</button>
     <div id="filters-container" style="display:none;">
       ${renderFilters(query, filters)}
     </div>
@@ -68,11 +71,14 @@ export async function renderSearch(app, params) {
   const filtersContainer = document.getElementById('filters-container');
   if (toggleBtn) {
     toggleBtn.addEventListener('click', () => {
-      filtersContainer.style.display = filtersContainer.style.display === 'none' ? 'block' : 'none';
+      const open = filtersContainer.style.display === 'none';
+      filtersContainer.style.display = open ? 'block' : 'none';
+      toggleBtn.classList.toggle('active', open);
     });
   }
 
   app.querySelectorAll('.filter-select').forEach(sel => {
+    sel.classList.toggle('active', !!sel.value);
     sel.addEventListener('change', () => {
       const f = {};
       app.querySelectorAll('.filter-select').forEach(s => {
@@ -92,7 +98,7 @@ export async function renderSearch(app, params) {
       try {
         const more = await searchVideos(query, filters, continuationToken);
         const list = document.getElementById('results-list');
-        for (const r of more.results || []) {
+        for (const r of (more.results || []).filter(r => showShorts || r.type !== 'shorts')) {
           list.insertAdjacentHTML('beforeend', renderResult(r, isListLayout));
         }
         continuationToken = more.continuationToken || '';
@@ -103,6 +109,24 @@ export async function renderSearch(app, params) {
       }
     });
   }
+}
+
+const SEARCH_CHIPS = [
+  { label: 'All', filters: {} },
+  { label: 'Shorts', filters: { type: 'shorts' } },
+  { label: 'Videos', filters: { type: 'video' } },
+  { label: 'Recently uploaded', filters: { sort_by: 'date' } },
+  { label: 'Live', filters: { features: 'live' } },
+];
+
+function renderChips(query, current, showShorts) {
+  const active = Object.entries(current).filter(([, v]) => v);
+  return SEARCH_CHIPS.filter(chip => showShorts || chip.label !== 'Shorts').map(chip => {
+    const entries = Object.entries(chip.filters);
+    const isActive = entries.length === active.length && entries.every(([k, v]) => current[k] === v);
+    const qs = entries.map(([k, v]) => `&${k}=${encodeURIComponent(v)}`).join('');
+    return `<a href="#/results?search_query=${encodeURIComponent(query)}${qs}" class="search-chip${isActive ? ' active' : ''}">${chip.label}</a>`;
+  }).join('');
 }
 
 function renderFilters(query, current) {
@@ -152,9 +176,27 @@ function renderFilters(query, current) {
 
 function renderResult(item, isList = true) {
   if (!item) return '';
+  if (item.type === 'shorts') return renderShortsShelf(item);
   if (item.type === 'channel') return renderChannelResult(item);
   if (item.type === 'playlist') return renderPlaylistResult(item, isList);
   return videoCard(item, isList);
+}
+
+function renderShortsShelf(shelf) {
+  return `
+    <div class="shorts-shelf">
+      <h2 class="shorts-shelf-title">${escapeHtml(shelf.title)}</h2>
+      <div class="shorts-shelf-row">
+        ${shelf.items.map(s => `
+          <a href="#${s.url}" class="short-card">
+            <img src="${proxyImageUrl(s.thumbnailUrl || '')}" alt="" loading="lazy">
+            <div class="short-card-title">${escapeHtml(s.title || '')}</div>
+            <div class="short-card-views">${escapeHtml(s.views || '')}</div>
+          </a>
+        `).join('')}
+      </div>
+    </div>
+  `;
 }
 
 function renderChannelResult(ch) {
@@ -165,7 +207,7 @@ function renderChannelResult(ch) {
         <img src="${proxyImageUrl(ch.iconUrl || '')}" alt="" loading="lazy">
       </div>
       <div>
-        <div class="channel-card-name">${escapeHtml(ch.name || '')}</div>
+        <div class="channel-card-name">${escapeHtml(ch.name || '')}${verifiedBadge(ch.verified)}</div>
         <div class="channel-card-meta">${[ch.subscribers, ch.videoCount].filter(Boolean).map(escapeHtml).join(' • ')}</div>
       </div>
     </a>
@@ -175,33 +217,53 @@ function renderChannelResult(ch) {
 function renderPlaylistResult(pl, isList = true) {
   const href = pl.url || '#';
   let thumb = pl.thumbnailUrl || '';
-  if (thumb.includes('/default.jpg')) thumb = thumb.replace('/default.jpg', '/hqdefault.jpg');
+  if (thumb.includes('/default.jpg')) thumb = thumb.replace('/default.jpg', '/mqdefault.jpg');
+  if (thumb.includes('/hqdefault.jpg')) thumb = thumb.replace('/hqdefault.jpg', '/mqdefault.jpg');
+
+  const channelHref = pl.authorId
+    ? `#/channel/${encodeURIComponent(pl.authorId)}`
+    : (pl.authorUrl ? `#${pl.authorUrl.startsWith('/') ? pl.authorUrl : '/' + pl.authorUrl}` : '');
+
+  const authorHtml = pl.author
+    ? (channelHref
+        ? `<a href="${channelHref}" class="video-card-author" onclick="event.stopPropagation();">${escapeHtml(pl.author)}</a>`
+        : `<span class="video-card-author">${escapeHtml(pl.author)}</span>`)
+    : '';
+
   if (!isList) {
     return `
-      <div class="video-card">
-        <a href="#${href}" class="video-card-link">
-          <div class="video-card-thumb">
+      <div class="video-card" style="position:relative;">
+        <div class="video-card-link" onclick="if (!event.target.closest('a')) location.hash = '#${href}';" style="cursor:pointer;">
+          <a href="#${href}" class="video-card-thumb" style="display:block;" tabindex="-1">
             <img src="${proxyImageUrl(thumb)}" alt="" loading="lazy">
             <span class="video-card-duration">▶ ${escapeHtml(pl.videoCount || '')}</span>
-          </div>
+          </a>
           <div class="video-card-info">
-            <div class="video-card-title">${escapeHtml(pl.title || '')}</div>
-            <div class="video-card-meta"><span>Playlist</span></div>
+            <a href="#${href}" class="video-card-title" style="display:block;text-decoration:none;">${escapeHtml(pl.title || '')}</a>
+            <div class="video-card-meta">
+              ${authorHtml}
+              <span class="video-card-stats">Playlist</span>
+            </div>
           </div>
-        </a>
+        </div>
       </div>
     `;
   }
   return `
-    <a href="#${href}" class="video-list-item">
-      <div class="video-list-thumb">
-        <img src="${proxyImageUrl(thumb)}" alt="" loading="lazy">
-        <span class="video-card-duration">▶ ${escapeHtml(pl.videoCount || '')}</span>
+    <div class="video-list-entry" style="position:relative;">
+      <div class="video-list-item" onclick="if (!event.target.closest('a')) location.hash = '#${href}';" style="cursor:pointer;">
+        <a href="#${href}" class="video-list-thumb" tabindex="-1">
+          <img src="${proxyImageUrl(thumb)}" alt="" loading="lazy">
+          <span class="video-card-duration">▶ ${escapeHtml(pl.videoCount || '')}</span>
+        </a>
+        <div class="video-list-info">
+          <a href="#${href}" class="video-list-title" style="display:block;text-decoration:none;">${escapeHtml(pl.title || '')}</a>
+          <div class="video-list-meta">
+            ${authorHtml}
+            <span class="video-card-stats">Playlist</span>
+          </div>
+        </div>
       </div>
-      <div class="video-list-info">
-        <div class="video-list-title">${escapeHtml(pl.title || '')}</div>
-        <div class="video-list-meta"><span>Playlist</span></div>
-      </div>
-    </a>
+    </div>
   `;
 }

@@ -20,6 +20,7 @@
 import { proxyImageUrl, getPlaylist } from '../api.js';
 import { escapeHtml } from '../router.js';
 import { getPlaylists, removeVideoFromPlaylist } from '../playlistManager.js';
+import { startShuffle, stopShuffle } from '../shuffle.js';
 
 export async function renderPlaylist(app, params) {
   const listId = params.list;
@@ -32,6 +33,7 @@ export async function renderPlaylist(app, params) {
 
   let data;
   const isLocal = listId.startsWith('pl_');
+  if (!isLocal) stopShuffle(listId);
 
   if (isLocal) {
     const playlists = getPlaylists();
@@ -83,17 +85,42 @@ export async function renderPlaylist(app, params) {
         <div class="playlist-hero-info">
           <div class="playlist-label">${isLocal ? 'User Playlist' : 'Playlist'}</div>
           <h1 class="playlist-title">${escapeHtml(data.title || 'Playlist')}</h1>
-          ${data.authorName ? `<div class="playlist-author">${escapeHtml(data.authorName)}</div>` : ''}
+          ${data.authorName ? (data.authorId || data.authorUrl
+            ? `<a href="${data.authorId ? `#/channel/${encodeURIComponent(data.authorId)}` : `#${data.authorUrl.startsWith('/') ? data.authorUrl : '/' + data.authorUrl}`}" class="playlist-author">${escapeHtml(data.authorName)}</a>`
+            : `<div class="playlist-author">${escapeHtml(data.authorName)}</div>`) : ''}
           <div class="playlist-meta">
             ${videos.length ? `<span>${videos.length} videos</span>` : ''}
             ${data.viewCount ? `<span>${escapeHtml(data.viewCount)}</span>` : ''}
           </div>
-          ${firstVideo ? `
-            <a href="#/watch?v=${firstVideo.videoId || firstVideo.id}&list=${listId}" class="playlist-play-btn">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
-              Play all
-            </a>
-          ` : ''}
+          <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:1rem;">
+            ${firstVideo ? `
+              <a href="#/watch?v=${firstVideo.videoId || firstVideo.id}&list=${listId}" class="playlist-play-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+                Play all
+              </a>
+              <a href="#/watch?v=${firstVideo.videoId || firstVideo.id}&list=${listId}&audio=1" class="playlist-play-btn" style="background:var(--bg-tertiary);color:var(--text-primary);" title="Play playlist in audio-only listen mode">
+                🎧 Audio Only
+              </a>
+            ` : ''}
+            ${isLocal && videos.length > 1 ? `
+              <button id="shuffle-pl-btn" class="playlist-play-btn" style="background:var(--bg-tertiary);color:var(--text-primary);cursor:pointer;" title="Shuffle videos in this playlist">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+                Shuffle
+              </button>
+            ` : ''}
+            ${!isLocal && videos.length > 1 ? `
+              <button id="shuffle-play-btn" class="playlist-play-btn" style="background:var(--bg-tertiary);color:var(--text-primary);cursor:pointer;" title="Play this playlist in random order">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+                Shuffle
+              </button>
+            ` : ''}
+            ${!isLocal && videos.length > 0 ? `
+              <button id="import-this-pl-btn" class="playlist-play-btn" style="background:var(--bg-tertiary);color:var(--text-primary);cursor:pointer;" title="Import to My Playlists">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Save to Local Playlists
+              </button>
+            ` : ''}
+          </div>
         </div>
       </div>
 
@@ -105,6 +132,16 @@ export async function renderPlaylist(app, params) {
   `;
 
   if (isLocal) {
+    const shuffleBtn = app.querySelector('#shuffle-pl-btn');
+    if (shuffleBtn) {
+      shuffleBtn.addEventListener('click', () => {
+        import('../playlistManager.js').then(pm => {
+          pm.shufflePlaylist(listId);
+          renderPlaylist(app, params);
+        });
+      });
+    }
+
     app.querySelectorAll('.remove-track-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.preventDefault();
@@ -114,24 +151,63 @@ export async function renderPlaylist(app, params) {
         renderPlaylist(app, params);
       });
     });
+  } else {
+    const shufflePlayBtn = app.querySelector('#shuffle-play-btn');
+    if (shufflePlayBtn) {
+      shufflePlayBtn.addEventListener('click', () => {
+        const [first] = startShuffle(listId, videos);
+        window.location.hash = `#/watch?v=${first.videoId || first.id}&list=${listId}`;
+      });
+    }
+
+    const importBtn = app.querySelector('#import-this-pl-btn');
+    if (importBtn) {
+      importBtn.addEventListener('click', () => {
+        import('../playlistManager.js').then(pm => {
+          const newId = pm.importYoutubePlaylist(data.title, data.videos);
+          window.location.hash = `#/playlist?list=${newId}`;
+        });
+      });
+    }
   }
 }
 
 function renderPlaylistTrack(v, i, listId, isLocal) {
   const videoId = v.videoId || v.id;
   if (!videoId) return '';
+  const href = `#/watch?v=${videoId}&list=${listId}`;
+  const authorName = v.author || v.authorName || '';
+  const channelHref = v.authorId
+    ? `#/channel/${encodeURIComponent(v.authorId)}`
+    : (v.authorUrl ? `#${v.authorUrl.startsWith('/') ? v.authorUrl : '/' + v.authorUrl}` : '');
+
+  const authorHtml = authorName
+    ? (channelHref
+        ? `<a href="${channelHref}" class="playlist-track-author" onclick="event.stopPropagation();">${escapeHtml(authorName)}</a>`
+        : `<span>${escapeHtml(authorName)}</span>`)
+    : '';
+
+  const stats = [v.views, v.publishDate].filter(Boolean).map(escapeHtml).join(' • ');
+  const statsHtml = stats ? `<span class="playlist-track-stats">${stats}</span>` : '';
+
   return `
     <div style="display:flex; align-items:center; gap:8px;">
-      <a href="#/watch?v=${videoId}&list=${listId}" class="playlist-track" style="flex:1;">
+      <div class="playlist-track" onclick="if (!event.target.closest('a')) location.hash = '${href}';" style="flex:1; cursor:pointer;">
         <span class="playlist-track-num">${i + 1}</span>
-        <div class="playlist-track-thumb">
+        <a href="${href}" class="playlist-track-thumb" tabindex="-1">
           <img src="${proxyImageUrl(v.thumbnailUrl || '')}" alt="" loading="lazy">
           ${v.duration ? `<span class="video-card-duration">${escapeHtml(v.duration)}</span>` : ''}
-        </div>
+        </a>
         <div class="playlist-track-info">
-          <div class="playlist-track-title">${escapeHtml(v.title || '')}</div>
-          <div class="playlist-track-meta">${escapeHtml(v.author || v.authorName || '')}</div>
+          <a href="${href}" class="playlist-track-title" style="display:block;text-decoration:none;">${escapeHtml(v.title || '')}</a>
+          <div class="playlist-track-meta">
+            ${authorHtml}
+            ${statsHtml}
+          </div>
         </div>
+      </div>
+      <a href="#/watch?v=${videoId}&list=${listId}&audio=1" title="Play audio only (Listen mode)" style="color:var(--text-muted);padding:8px;text-decoration:none;font-size:1.1rem;display:flex;align-items:center;">
+        🎧
       </a>
       ${isLocal ? `
         <button class="remove-track-btn" data-vid="${videoId}" title="Remove video" style="background:none;border:none;color:var(--text-muted);padding:8px;cursor:pointer;">

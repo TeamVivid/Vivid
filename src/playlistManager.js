@@ -50,6 +50,45 @@ export function deletePlaylist(id) {
   savePlaylists(playlists);
 }
 
+export function shufflePlaylist(id) {
+  const playlists = getPlaylists();
+  const playlist = playlists.find(p => p.id === id);
+  if (!playlist || !playlist.videos || playlist.videos.length <= 1) return;
+  for (let i = playlist.videos.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [playlist.videos[i], playlist.videos[j]] = [playlist.videos[j], playlist.videos[i]];
+  }
+  savePlaylists(playlists);
+}
+
+export function importYoutubePlaylist(name, videos) {
+  const playlists = getPlaylists();
+  const id = 'pl_' + Math.random().toString(36).substr(2, 9);
+  const formattedVideos = (videos || []).map(v => ({
+    videoId: v.videoId || v.id,
+    id: v.videoId || v.id,
+    title: v.title || '',
+    author: v.author || v.authorName || '',
+    authorName: v.author || v.authorName || '',
+    authorId: v.authorId || '',
+    authorUrl: v.authorUrl || '',
+    views: v.views || '',
+    publishDate: v.publishDate || '',
+    duration: v.duration || '',
+    thumbnailUrl: v.thumbnailUrl || '',
+    addedAt: new Date().toISOString(),
+  }));
+
+  playlists.push({
+    id,
+    name: name || 'Imported Playlist',
+    videos: formattedVideos,
+    createdAt: new Date().toISOString()
+  });
+  savePlaylists(playlists);
+  return id;
+}
+
 export function addVideoToPlaylist(playlistId, video) {
   const playlists = getPlaylists();
   const playlist = playlists.find(p => p.id === playlistId);
@@ -61,6 +100,10 @@ export function addVideoToPlaylist(playlistId, video) {
         title: video.title || '',
         author: video.author || video.authorName || '',
         authorName: video.author || video.authorName || '',
+        authorId: video.authorId || '',
+        authorUrl: video.authorUrl || '',
+        views: video.views || '',
+        publishDate: video.publishDate || '',
         duration: video.duration || '',
         thumbnailUrl: video.thumbnailUrl || '',
         addedAt: new Date().toISOString(),

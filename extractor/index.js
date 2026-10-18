@@ -20,10 +20,11 @@ import InnerTubeClient from './innertube.js';
 import { search, searchContinuation } from './search.js';
 import { getVideoDetail, loadMoreSuggestions, getPlaylist } from './video.js';
 import { getStreamUrls, getBestAudioUrl, getCombinedStreamUrl } from './stream.js';
-import { getChannel, getChannelStreams, getChannelShorts, loadMoreChannelItems, loadChannelPlaylists, loadCommunityPosts } from './channel.js';
+import { getChannel, getChannelStreams, getChannelShorts, loadMoreChannelItems, loadChannelPlaylists, loadCommunityPosts,
+  loadChannelSections, searchChannel, getChannelAbout, loadPostComments } from './channel.js';
 import { getTrending } from './home.js';
 import { getComments, getCommentReplies } from './comments.js';
-import { getCaptionTracks, getCaptionContent } from './captions.js';
+import { getCaptionTracks, getCaptionContent, getCaptionVtt, cacheCaptionTracks } from './captions.js';
 import livechat from './livechat.js';
 import * as utils from './utils.js';
 import * as constants from './constants.js';
@@ -48,11 +49,37 @@ class VividExtractor {
   async loadMoreChannelItems(token) { return loadMoreChannelItems(this.client, token); }
   async loadChannelPlaylists(browseId, params) { return loadChannelPlaylists(this.client, browseId, params); }
   async loadCommunityPosts(channelUrl, token) { return loadCommunityPosts(this.client, channelUrl, token); }
+  async loadChannelSections(browseId, params) { return loadChannelSections(this.client, browseId, params); }
+  async searchChannel(urlOrId, query) { return searchChannel(this.client, urlOrId, query); }
+  async getChannelAbout(urlOrId) { return getChannelAbout(this.client, urlOrId); }
+  async loadPostComments(postId, channelId, token) { return loadPostComments(this.client, postId, channelId, token); }
   async getTrending() { return getTrending(this.client); }
-  async getComments(token, type) { return getComments(this.client, token, type); }
-  async getCommentReplies(token) { return getCommentReplies(this.client, token); }
+  async getComments(token, type, useWeb) { return getComments(this.client, token, type, useWeb); }
+  async getCommentReplies(token, useWeb) { return getCommentReplies(this.client, token, useWeb); }
   async getCaptionTracks(videoId) { return getCaptionTracks(this.client, videoId); }
   async getCaptionContent(baseUrl, lang) { return getCaptionContent(baseUrl, lang); }
+  async getCaptionVtt(baseUrl, lang) { return getCaptionVtt(baseUrl, lang); }
+  cacheCaptionTracks(videoId, renderer) { return cacheCaptionTracks(videoId, renderer); }
+  async getFullVideo(videoId, options = {}) {
+    const listId = options.list || options.playlistId || null;
+    const [video, streams, captions] = await Promise.all([
+      this.getVideoDetail(videoId, listId),
+      this.getStreamUrls(videoId, options),
+      this.getCaptionTracks(videoId)
+    ]);
+    if (streams && streams.duration && (!video.duration || video.duration === 0)) {
+      video.duration = Math.round(streams.duration / 1000);
+    }
+    if (streams?.isLivestream) {
+      video.isLivestream = true;
+    }
+    return {
+      videoId,
+      video,
+      streams,
+      captions
+    };
+  }
   async getLiveChat(token, options) { return livechat.getLiveChat(this.client, token, options); }
 }
 

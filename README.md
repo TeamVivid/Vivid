@@ -4,7 +4,7 @@ A privacy focused alternative YouTube frontend inspired by Invidious and Nitter
 
 ## Instances
 
-- [Official Public Instance](https://vivid.errexe.xyz/)
+- [Official Public Instance](https://vivid.errexe.xyz/) ([Privacy Policy](https://i.errexe.xyz/vivid/public-privacy-v1.html))
 
 ## Self Hosting
 
@@ -38,13 +38,33 @@ A privacy focused alternative YouTube frontend inspired by Invidious and Nitter
 
 The app will be available at `http://localhost:3067`.
 
+## Configuration (Environment Variables)
+
+- `PORT`: server port (default `3067`)
+- `PRIVACY_POLICY_URL` / `PRIVACY-POLICY-URL`: link the footer's Privacy Policy to your own policy instead of the built-in page
+- `VIVID_LANG`: language for innertube requests
+- `FORCE_SABR`: force SABR
+- `DISABLE_SABR`: disable SABR
+- `SPECIAL_CLIENT_RETRY`: retries for special innertube clients
+- `FORCE_YT_DLP`: force yt-dlp extraction
+- `YT_DLP_PATH`: custom yt-dlp binary path
+- `YT_COOKIE_HEADER`: custom cookie header for BotGuard
+- `YT_AUTH_HEADER`: custom auth header for BotGuard
+
+## Configuration (Config Files)
+
+
+- `cookies.txt`: create a cookies.txt file to bypass login requirements
+- `proxies.txt`: create a proxies.txt file to bypass IP bans
+
+
 ## Architecture
 
 Vivid is split into three main components:
 
-- **Extractor**: the extracotr
-- **Server**: the api server
-- **Frontend**: the frontend
+- **Extractor**: Vivid's Extractor
+- **Server**: Vivid's API
+- **Frontend**: Vivid's Frontend
 
 ## License
 

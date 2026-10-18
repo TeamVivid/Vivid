@@ -17,8 +17,8 @@
  */
 
 
-import { getPlaylists, createPlaylist, deletePlaylist } from '../playlistManager.js';
-import { proxyImageUrl } from '../api.js';
+import { getPlaylists, createPlaylist, deletePlaylist, importYoutubePlaylist } from '../playlistManager.js';
+import { proxyImageUrl, getPlaylist } from '../api.js';
 import { escapeHtml } from '../router.js';
 
 export function renderUserPlaylists(app) {
@@ -28,10 +28,16 @@ export function renderUserPlaylists(app) {
   app.innerHTML = `
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.5rem; flex-wrap:wrap; gap:1rem;">
       <h1 class="page-title" style="margin:0;">My Playlists</h1>
-      <button id="create-pl-btn" class="modal-btn-primary" style="display:flex; align-items:center; gap:6px;">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        <span>New Playlist</span>
-      </button>
+      <div style="display:flex; gap:8px;">
+        <button id="import-yt-btn" class="modal-btn-secondary" style="display:flex; align-items:center; gap:6px;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span>Import YouTube Playlist</span>
+        </button>
+        <button id="create-pl-btn" class="modal-btn-primary" style="display:flex; align-items:center; gap:6px;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          <span>New Playlist</span>
+        </button>
+      </div>
     </div>
 
     <div class="video-grid" id="user-playlists-grid">
@@ -44,6 +50,29 @@ export function renderUserPlaylists(app) {
       ` : ''}
     </div>
   `;
+
+  app.querySelector('#import-yt-btn').addEventListener('click', async () => {
+    const input = prompt('Enter YouTube playlist URL or ID (e.g. PL...):');
+    if (!input || !input.trim()) return;
+    let listId = input.trim();
+    const match = listId.match(/[?&]list=([a-zA-Z0-9_-]+)/);
+    if (match) listId = match[1];
+
+    const btn = app.querySelector('#import-yt-btn');
+    btn.disabled = true;
+    btn.textContent = 'Importing...';
+
+    try {
+      const data = await getPlaylist(listId);
+      if (data.error) throw new Error(data.error);
+      const newId = importYoutubePlaylist(data.title || 'Imported Playlist', data.videos || []);
+      renderUserPlaylists(app);
+      window.location.hash = `#/playlist?list=${newId}`;
+    } catch (e) {
+      alert('Failed to import YouTube playlist: ' + e.message);
+      renderUserPlaylists(app);
+    }
+  });
 
   app.querySelector('#create-pl-btn').addEventListener('click', () => {
     const name = prompt('Enter a name for the new playlist:');

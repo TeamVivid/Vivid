@@ -19,23 +19,34 @@
 export const API_URL = 'https://www.youtube.com/youtubei/v1/';
 export const MOBILE_API_URL = 'https://m.youtube.com/youtubei/v1/';
 
-export function getInnertubeApiUrl(apiName) {
-  return `${MOBILE_API_URL}${apiName}?prettyPrint=false`;
+export function getInnertubeApiUrl(apiName, client = null) {
+  const base = client?.apiUrl || MOBILE_API_URL;
+  return `${base}${apiName}?prettyPrint=false`;
 }
 
 export const MWEB = {
   clientName: 'MWEB',
   clientId: '2',
-  clientVersion: '2.20260820.08.00',
-  userAgent: 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
+  clientVersion: '2.20261016.01.00',
+  userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 26_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/154.0.0.0 Mobile/15E148 Safari/604.1',
   apiUrl: MOBILE_API_URL,
+  origin: 'https://m.youtube.com',
+  pageUrl: 'https://m.youtube.com',
+  osName: 'iPhone',
+  osVersion: '26_4_1',
+  deviceMake: 'Apple',
+  deviceModel: 'iPhone',
+  platform: 'MOBILE',
+  clientFormFactor: 'SMALL_FORM_FACTOR',
+  browserName: 'Chrome Mobile',
+  browserVersion: '154.0.0.0',
 };
 
 export const ANDROID = {
   clientName: 'ANDROID',
   clientId: '3',
   clientVersion: '21.12.525',
-  userAgent: 'com.google.android.youtube/19.51.37 (Linux; U; Android 14; de_DE; Quest 3) gzip',
+  userAgent: 'com.google.android.youtube/19.51.37 (Linux; U; Android 14; en_US; Quest 3) gzip',
   osName: 'Android',
   osVersion: '14',
   androidSdkVersion: '34',
@@ -87,8 +98,37 @@ export const VISIONOS = {
 export const WEB = {
   clientName: 'WEB',
   clientId: '1',
-  clientVersion: '2.20260820.08.00',
-  userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:94.0) Gecko/20100101 Firefox/94.0',
+  clientVersion: '2.20261016.01.00',
+  userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  origin: 'https://www.youtube.com',
+  pageUrl: 'https://www.youtube.com',
+  apiUrl: API_URL,
+  osName: 'Windows',
+  osVersion: '10.0',
+  platform: 'DESKTOP',
+  browserName: 'Chrome',
+  browserVersion: '131.0.0.0',
+};
+
+export const TVHTML5 = {
+  clientName: 'TVHTML5',
+  clientId: '31',
+  clientVersion: '7.20261014.18.00',
+  userAgent: 'Mozilla/5.0 (Linux arm64-v8a; Android 10) Cobalt/25.lts.30.1034958-gold (unlike Gecko) v8/8.8.278.17-jit gles Starboard/15, Sony_ATV_sdm845_13140765/52.1.C.0.268 (KDDI, SOV38) com.google.android.youtube.tv/5.30.301',
+  origin: 'https://www.youtube.com',
+  pageUrl: 'https://www.youtube.com/tv',
+  apiUrl: API_URL,
+  deviceMake: 'Sony',
+  deviceModel: 'Sony_ATV_sdm845_13140765',
+};
+
+export const TVHTML5_SIMPLY = {
+  clientName: 'TVHTML5_SIMPLY',
+  clientId: '74',
+  clientVersion: '1.0',
+  userAgent: 'Mozilla/5.0 (PlayStation 4 5.55) AppleWebKit/601.2 (KHTML, like Gecko)',
+  origin: 'https://www.youtube.com',
+  pageUrl: 'https://www.youtube.com/tv',
   apiUrl: API_URL,
 };
 

@@ -18,8 +18,18 @@
 
 import { getTextFromObject, parseSuccinctVideo, parseSuccinctChannel, parseSuccinctPlaylist, convertUrlToMobile } from './utils.js';
 import { buildSearchParams } from './constants.js';
+import { parseShelfItem } from './channel.js';
 
 function parseSearchItem(content) {
+  if (content.videoRenderer) {
+    return parseSuccinctVideo(content.videoRenderer);
+  }
+  if (content.channelRenderer) {
+    return parseSuccinctChannel(content.channelRenderer);
+  }
+  if (content.playlistRenderer) {
+    return parseSuccinctPlaylist(content.playlistRenderer);
+  }
   if (content.compactVideoRenderer) {
     return parseSuccinctVideo(content.compactVideoRenderer);
   }
@@ -33,13 +43,19 @@ function parseSearchItem(content) {
     const renderer = content.compactRadioRenderer || content.compactPlaylistRenderer;
     return parseSuccinctPlaylist(renderer);
   }
-  if (content.reelShelfRenderer || content.showingResultsForRenderer || content.gridShelfViewModel) {
-    return null;
+  const shelf = content.reelShelfRenderer || content.gridShelfViewModel;
+  if (shelf) {
+    const items = (shelf.items || shelf.contents || []).map(parseShelfItem).filter(Boolean);
+    return items.length ? { type: 'shorts', title: 'Shorts', items } : null;
   }
   return null;
 }
 
 export async function search(client, query, filters = {}) {
+  if (filters.type === 'shorts') {
+    query = `${query} #shorts`;
+    filters = { ...filters, type: 'video', duration: 'short' };
+  }
   const params = buildSearchParams(filters);
   const data = await client.search(query, params);
 
@@ -51,7 +67,8 @@ export async function search(client, query, filters = {}) {
     filters: filters,
   };
 
-  const contents = data?.contents?.sectionListRenderer?.contents;
+  const contents = data?.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents
+    || data?.contents?.sectionListRenderer?.contents;
   if (!contents) {
     return { ...result, error: 'Unexpected result structure' };
   }

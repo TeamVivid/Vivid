@@ -18,13 +18,16 @@
 
 import videojs from 'video.js';
 import 'video.js/dist/video-js.css';
-import { getVideo, getStreams, getComments, getCommentReplies, getCaptions, proxyImageUrl, proxyStreamUrl, proxyHlsUrl, getSponsorBlockSegments, syncAccount } from '../api.js';
+import { getVideo, getStreams, getFullVideo, getComments, getCommentReplies, getCaptions, proxyImageUrl, proxyStreamUrl, proxyHlsUrl, getSponsorBlockSegments, syncAccount } from '../api.js';
 import { escapeHtml } from '../router.js';
+import { verifiedBadge } from './home.js';
 import { getSettings, saveSettings, SPONSOR_CATEGORIES } from '../settings.js';
 import { getPlaylists, addVideoToPlaylist, removeVideoFromPlaylist, isVideoInPlaylist, createPlaylist, syncWithServer } from '../playlistManager.js';
+import { getShuffleOrder, startShuffle, stopShuffle } from '../shuffle.js';
 import { SabrMediaSourcePlayer } from '../sabrPlayer.js';
 import { DashMediaSourcePlayer } from '../dashPlayer.js';
 import { startLiveChat } from '../liveChat.js';
+import { downloadAdaptive, downloadSabr, fetchStreamBlob, muxBlobs, DOWNLOAD_FORMATS } from '../downloader.js';
 
 let vjsPlayer = null;
 window.vjsPlayer = null;
@@ -67,6 +70,11 @@ function stopPlayback() {
 window.seekVideo = function(seconds) {
   if (window.vjsPlayer) {
     window.vjsPlayer.currentTime(seconds);
+    window.vjsPlayer.play().catch(() => {});
+  }
+  const vid = document.getElementById('vjs-video') || document.querySelector('.watch-player-wrapper');
+  if (vid) {
+    vid.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 };
 
@@ -77,18 +85,27 @@ const ICONS = {
   pin: `<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>`,
   heart: `<svg width="11" height="11" viewBox="0 0 24 24" fill="#f00"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>`,
   next: `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 15,12 5,21"/><rect x="17" y="3" width="2" height="18"/></svg>`,
+  shuffle: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>`,
   listPlay: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>`,
 };
 
 function linkifyText(text) {
-  const parts = text.split(/(https?:\/\/[^\s<>"']+)/g);
-  return parts.map((part, i) => {
-    if (i % 2 === 1) {
-      const escapedUrl = part.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      return `<a href="${escapedUrl}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);word-break:break-all;">${escapedUrl}</a>`;
+  if (!text) return '';
+  const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const withTimestamps = escaped.replace(/(\d+:)?(\d{1,2}):(\d{2})(?!\w)/g, (match) => {
+    const parts = match.split(':').filter(Boolean);
+    let totalSeconds = 0;
+    if (parts.length === 2) {
+      totalSeconds = parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10);
+    } else if (parts.length === 3) {
+      totalSeconds = parseInt(parts[0], 10) * 3600 + parseInt(parts[1], 10) * 60 + parseInt(parts[2], 10);
     }
-    return part.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
-  }).join('');
+    return `<a href="javascript:void(0)" onclick="seekVideo(${totalSeconds})" class="timestamp-link" style="color:var(--accent);text-decoration:underline;cursor:pointer;">${match}</a>`;
+  });
+  const withUrls = withTimestamps.replace(/(https?:\/\/[^\s<>"']+)/g, (url) => {
+    return `<a href="${url}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);word-break:break-all;">${url}</a>`;
+  });
+  return withUrls.replace(/\n/g, '<br>');
 }
 
 function linkifyComment(text) {
@@ -125,20 +142,50 @@ export async function renderWatch(app, params) {
     return;
   }
 
+  const urlSearch = new URLSearchParams(window.location.search);
+  const forceClient = (params.forceclient || params.forceClient || params.client || urlSearch.get('forceclient') || urlSearch.get('forceClient') || urlSearch.get('client') || '').toLowerCase();
+  const clientParam = forceClient ? `&forceclient=${encodeURIComponent(forceClient)}` : '';
+
   stopPlayback();
 
   app.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
 
-  const [detail, streams, captionsData, sponsorRes] = await Promise.allSettled([
-    getVideo(videoId, listId),
-    getStreams(videoId, getSettings().trySabr),
-    getCaptions(videoId),
+  let detailObj = {};
+  let streamsObj = {};
+  let capsObj = null;
+
+  const isAudioOnly = params.audio === '1' || params.listen === '1';
+  const audioParam = isAudioOnly ? '&audio=1' : '';
+
+  const [fullRes, sponsorRes] = await Promise.allSettled([
+    getFullVideo(videoId, { list: listId, includeSabr: getSettings().trySabr, client: forceClient || undefined }),
     getSettings().sponsorBlockEnabled ? getSponsorBlockSegments(videoId) : Promise.resolve([])
   ]);
 
-  const detailObj = detail.status === 'fulfilled' ? detail.value : {};
-  const streamsObj = streams.status === 'fulfilled' ? streams.value : {};
-  const capsObj = captionsData.status === 'fulfilled' ? captionsData.value : null;
+  if (fullRes.status === 'fulfilled' && fullRes.value) {
+    const fv = fullRes.value;
+    detailObj = fv.video || fv;
+    streamsObj = fv.streams || fv;
+    capsObj = fv.captions || fv;
+  } else {
+    const [detail, streams, captionsData] = await Promise.allSettled([
+      getVideo(videoId, listId),
+      getStreams(videoId, getSettings().trySabr, forceClient || null),
+      getCaptions(videoId),
+    ]);
+    detailObj = detail.status === 'fulfilled' ? detail.value : {};
+    streamsObj = streams.status === 'fulfilled' ? streams.value : {};
+    capsObj = captionsData.status === 'fulfilled' ? captionsData.value : null;
+  }
+
+  if (isAudioOnly && (!streamsObj.sabr?.available || !getSettings().trySabr) && (!streamsObj.audioStreams || !streamsObj.audioStreams.some(a => a.url))) {
+    try {
+      const directStreams = await getStreams(videoId, false, forceClient || null);
+      if (directStreams && directStreams.audioStreams?.some(a => a.url)) {
+        streamsObj = directStreams;
+      }
+    } catch {}
+  }
 
   sponsorSegments = [];
   if (sponsorRes.status === 'fulfilled' && Array.isArray(sponsorRes.value)) {
@@ -153,6 +200,9 @@ export async function renderWatch(app, params) {
     app.innerHTML = `<div class="error-msg">Stream Error: ${escapeHtml(streamsObj.error)}</div>`;
     return;
   }
+  if (streamsObj.isLivestream || !!streamsObj.hlsManifestUrl) {
+    detailObj.isLivestream = true;
+  }
   if (detailObj.title) {
     document.title = `${detailObj.title} - Vivid`;
   }
@@ -163,6 +213,12 @@ export async function renderWatch(app, params) {
   const trackKey = (a) => `${a.audioTrackId || ''}|${a.displayName || ''}`;
 
   const sabrAudioFor = (video, choice) => {
+    if (!video) {
+      return (choice && streamsObj.audioStreams.find(a => trackKey(a) === trackKey(choice)))
+        || streamsObj.audioStreams.find(a => a.isDefault)
+        || streamsObj.audioStreams.find(a => a.isOriginal)
+        || streamsObj.audioStreams[0];
+    }
     const container = video.mimeType.split(';')[0].split('/')[1];
     const sameContainer = streamsObj.audioStreams.filter(a => a.mimeType.includes(`/${container}`));
     const pool = sameContainer.length ? sameContainer : streamsObj.audioStreams;
@@ -170,13 +226,14 @@ export async function renderWatch(app, params) {
       || pool.find(a => a.isDefault) || pool.find(a => a.isOriginal) || pool[0];
   };
 
-  if (streamsObj.sabr?.available && appSettings.trySabr) {
+  const isTvClient = streamsObj.usedClient === 'TVHTML5_SIMPLY' || streamsObj.sabr?.clientName === 'TVHTML5_SIMPLY' || streamsObj.usedClient === 'tv_simply' || forceClient === 'tv_simply' || forceClient === 'tvhtml5_simply';
+  if (streamsObj.sabr?.available && appSettings.trySabr && !isTvClient) {
     if (streamsObj.qualityMap && Object.keys(streamsObj.qualityMap).length) {
       for (const [res, stream] of Object.entries(streamsObj.qualityMap).sort((a,b)=>b[0]-a[0])) {
         qualities.push({
           label: `${res}p (SABR)`,
           type: 'sabr',
-          sabrInfo: streamsObj.sabr,
+          sabrInfo: { ...streamsObj.sabr, videoId },
           videoFmt: stream,
         });
       }
@@ -184,24 +241,38 @@ export async function renderWatch(app, params) {
       qualities.push({
         label: 'SABR (Adaptive)',
         type: 'sabr',
-        sabrInfo: streamsObj.sabr,
+        sabrInfo: { ...streamsObj.sabr, videoId },
         videoFmt: streamsObj.bestVideo,
       });
     }
+    qualities.push({
+      label: 'Audio Only (SABR)',
+      type: 'sabr',
+      sabrInfo: { ...streamsObj.sabr, videoId },
+      videoFmt: null,
+    });
   }
 
   if (streamsObj.combinedStreams?.length) {
-    qualities.push({ label: '360p', url: streamsObj.combinedStreams[0].url, type: 'combined' });
+    qualities.push({
+      label: '360p',
+      url: streamsObj.combinedStreams[0].url,
+      mimeType: streamsObj.combinedStreams[0].mimeType || 'video/mp4',
+      type: 'combined',
+    });
   }
-  if (streamsObj.qualityMap && !streamsObj.sabr?.available) {
+  if (streamsObj.qualityMap) {
     for (const [res, stream] of Object.entries(streamsObj.qualityMap).sort((a,b)=>b[0]-a[0])) {
-      qualities.push({ label: `${res}p`, url: stream.url, mimeType: stream.mimeType, audioUrl: streamsObj.bestAudio?.url, type: 'adaptive' });
+      if (stream.url && !qualities.some(q => q.label === `${res}p`)) {
+        qualities.push({ label: `${res}p`, url: stream.url, mimeType: stream.mimeType, audioUrl: streamsObj.bestAudio?.url, type: 'adaptive' });
+      }
     }
   }
 
   const probe = document.createElement('audio');
   const seenTracks = new Set();
   const audioOptions = (streamsObj.audioStreams || []).filter(a => {
+    if (!a.url && !streamsObj.sabr?.available) return false;
     if (!probe.canPlayType(a.mimeType)) return false;
     const key = trackKey(a);
     if (seenTracks.has(key)) return false;
@@ -212,42 +283,74 @@ export async function renderWatch(app, params) {
   if (initialAudioIdx === -1) initialAudioIdx = audioOptions.findIndex(a => a.isOriginal);
   if (initialAudioIdx === -1) initialAudioIdx = 0;
 
-  let initialQ = qualities.find(q => q.label.startsWith('720p')) || qualities.find(q => q.label.startsWith('1080p')) || qualities.find(q => q.label.startsWith('360p')) || qualities[0];
+  const activeAudio = audioOptions[initialAudioIdx] || audioOptions[0];
+  const audioCandidates = audioOptions.filter(a => a.url);
+  const preferredAudio = audioCandidates.find(a => (a.mimeType || '').includes('mp4') && trackKey(a) === trackKey(activeAudio))
+    || audioCandidates.find(a => (a.mimeType || '').includes('mp4'))
+    || audioCandidates.find(a => trackKey(a) === trackKey(activeAudio))
+    || audioCandidates[0]
+    || activeAudio;
+
+  if (isAudioOnly) {
+    if (preferredAudio?.url) {
+      qualities.unshift({
+        label: 'Audio Only',
+        url: preferredAudio.url,
+        mimeType: preferredAudio.mimeType,
+        type: 'audio_direct'
+      });
+    }
+    if (streamsObj.sabr?.available && appSettings.trySabr && !isTvClient) {
+      qualities.unshift({
+        label: 'Audio Only (SABR)',
+        type: 'sabr',
+        sabrInfo: { ...streamsObj.sabr, videoId },
+        videoFmt: null,
+      });
+    }
+  }
+
+  let initialQ = isAudioOnly
+    ? (qualities.find(q => q.type === 'sabr' && !q.videoFmt) || qualities.find(q => q.type === 'audio_direct') || qualities[0])
+    : qualities.find(q => q.label.startsWith('720p')) || qualities.find(q => q.label.startsWith('1080p')) || qualities.find(q => q.label.startsWith('360p')) || qualities[0];
+  let currentActiveStream = initialQ;
 
   const playlist = detailObj.playlist || null;
   const playlistVideos = playlist?.videos || [];
-  const currentIdx = playlist?.selectedIndex ?? -1;
+  const idOf = (v) => v.videoId || v.id;
 
-  const sidebarVideos = listId && playlistVideos.length > 0
-    ? playlistVideos
-    : (detailObj.suggestions || []).filter(s => s.type === 'video');
+  let shuffleOrder = listId && playlist ? getShuffleOrder(listId) : null;
+  if (shuffleOrder && !shuffleOrder.some(v => idOf(v) === videoId)) {
+    shuffleOrder = startShuffle(listId, playlistVideos, videoId);
+  }
 
-  const nextVideos = listId && playlistVideos.length > 0
-    ? playlistVideos.slice(currentIdx + 1)
-    : sidebarVideos;
+  const getListView = () => {
+    const inList = listId && playlistVideos.length > 0;
+    const videos = inList
+      ? (shuffleOrder || playlistVideos)
+      : (detailObj.suggestions || []).filter(s => s.type === 'video');
+    const idx = inList
+      ? (shuffleOrder ? shuffleOrder.findIndex(v => idOf(v) === videoId) : (playlist?.selectedIndex ?? -1))
+      : -1;
+    const total = shuffleOrder ? shuffleOrder.length : (playlist?.totalVideos || playlistVideos.length);
+    return {
+      videos,
+      idx,
+      next: inList ? videos.slice(idx + 1) : videos,
+      title: listId && playlist ? `${escapeHtml(playlist.title || 'Playlist')} · ${idx + 1}/${total}` : 'Up next',
+    };
+  };
 
-  const sidebarTitle = listId && playlist
-    ? `${escapeHtml(playlist.title || 'Playlist')} · ${currentIdx + 1}/${playlist.totalVideos || playlistVideos.length}`
-    : 'Up next';
+  let { videos: sidebarVideos, idx: currentIdx, next: nextVideos, title: sidebarTitle } = getListView();
+
+  const posterUrl = proxyImageUrl(`https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`);
 
   app.innerHTML = `
     <div class="watch-layout">
       <div class="watch-primary">
-        <div class="watch-player-wrapper" style="position:relative;">
-          <video id="vjs-video" class="video-js vjs-default-skin vjs-big-play-centered" controls preload="auto" width="100%" height="auto"></video>
+        <div class="watch-player-wrapper${isAudioOnly ? ' audio-only-active' : ''}" style="position:relative;">
+          <video id="vjs-video" class="video-js vjs-default-skin vjs-big-play-centered" controls preload="auto" width="100%" height="auto" poster="${posterUrl}"></video>
         </div>
-
-        ${detailObj.liveChat ? `
-          <div class="live-chat-panel">
-            <div class="live-chat-header">
-              <span>${detailObj.liveChat.isReplay ? 'Chat Replay' : 'Live Chat'}</span>
-              <span id="live-chat-status" class="live-chat-status"></span>
-              ${detailObj.liveChat.modes.length ? `<select id="live-chat-mode" class="live-chat-mode">${detailObj.liveChat.modes.map(m => `<option value="${escapeHtml(m.continuation)}" ${m.selected ? 'selected' : ''}>${escapeHtml(m.title)}</option>`).join('')}</select>` : ''}
-              ${detailObj.liveChat.isReplay ? '' : '<span class="live-chat-badge">● LIVE</span>'}
-            </div>
-            <div id="live-chat-messages" class="live-chat-messages"></div>
-          </div>
-        ` : ''}
 
         <div class="watch-info">
           <h1 class="watch-title">${escapeHtml(detailObj.title || '')}</h1>
@@ -259,20 +362,35 @@ export async function renderWatch(app, params) {
           <span class="watch-like-btn">${ICONS.thumbUp}<span>${escapeHtml(String(detailObj.likes || '0'))}</span></span>
           <span class="watch-like-btn">${ICONS.thumbDown}<span>${escapeHtml(String(detailObj.dislikes || '0'))}</span></span>
           <span id="share-btn" class="watch-like-btn" style="cursor: pointer; display: inline-flex; align-items: center; gap: 6px;">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="18" cy="5" r="3"></circle>
-          <circle cx="6" cy="12" r="3"></circle>
-          <circle cx="18" cy="19" r="3"></circle>
-          <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line>
-          <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
-          </svg>
-          <span>Share</span>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="18" cy="5" r="3"></circle>
+              <circle cx="6" cy="12" r="3"></circle>
+              <circle cx="18" cy="19" r="3"></circle>
+              <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line>
+              <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
+            </svg>
+            <span>Share</span>
           </span>
           <span id="save-pl-btn" class="watch-like-btn" style="cursor: pointer; display: inline-flex; align-items: center; gap: 6px;">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
-          </svg>
-          <span>Save</span>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+            </svg>
+            <span>Save</span>
+          </span>
+          <span id="download-btn" class="watch-like-btn" style="cursor: pointer; display: inline-flex; align-items: center; gap: 6px;" title="Download">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            <span>Download</span>
+          </span>
+          <span id="listen-mode-toggle" class="watch-like-btn" style="cursor: pointer; display: inline-flex; align-items: center; gap: 6px;" title="${isAudioOnly ? 'Switch to Video Mode' : 'Switch to Audio Only'}">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 18v-6a9 9 0 0 1 18 0v6"/>
+              <path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/>
+            </svg>
+            <span>${isAudioOnly ? 'Video' : 'Audio only'}</span>
           </span>
           </div>
           ${detailObj.author?.id ? `
@@ -281,15 +399,34 @@ export async function renderWatch(app, params) {
                 <img src="${proxyImageUrl(detailObj.author.iconUrl || '')}" alt="">
               </a>
               <div>
-                <a href="#/channel/${detailObj.author.id}" class="watch-channel-name">${escapeHtml(detailObj.author.name || '')}</a>
+                <a href="#/channel/${detailObj.author.id}" class="watch-channel-name">${escapeHtml(detailObj.author.name || '')}${verifiedBadge(detailObj.author.verified)}</a>
                 ${detailObj.author.subscribers ? `<div class="watch-channel-subs">${escapeHtml(detailObj.author.subscribers)}</div>` : ''}
               </div>
               <button id="watch-sub-btn" class="watch-sub-btn" style="margin-left:auto; padding:6px 16px; background:#e50914; color:#fff; border:none; border-radius:16px; font-weight:600; cursor:pointer;">Subscribe</button>
             </div>
           ` : ''}
-          ${detailObj.description ? `
+          ${detailObj.description || detailObj.descriptionSections?.length || capsObj?.baseLanguages?.length ? `
             <div class="watch-description" id="watch-description">
-              <div class="watch-description-body">${linkifyText(detailObj.description)}</div>
+              <div class="watch-description-body">${linkifyText(detailObj.description || '')}</div>
+              <div class="watch-description-extra">
+          ${renderDescriptionSections(detailObj.descriptionSections)}
+                ${capsObj?.baseLanguages?.some(t => t.baseUrl) ? `
+                  <div class="watch-extra">
+                    <h3 class="watch-extra-title">Transcript</h3>
+                    <p class="watch-extra-sub">Follow along with the transcript.</p>
+                    <div class="watch-transcript-bar">
+                      <button class="search-chip" id="transcript-toggle" style="cursor:pointer;">Show transcript</button>
+                    </div>
+                  </div>
+                ` : ''}
+                <div class="watch-extra">
+                  <h3 class="watch-extra-title">Video details</h3>
+                  <dl class="watch-details">
+                    ${[['Date', detailObj.publishDate], ['Views', detailObj.views], ['Likes', detailObj.likes && detailObj.likes !== '0' ? detailObj.likes : '']]
+                      .filter(([, v]) => v).map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('')}
+                  </dl>
+                </div>
+              </div>
               <button class="watch-desc-toggle" id="desc-toggle">Show more</button>
             </div>
           ` : ''}
@@ -303,20 +440,67 @@ export async function renderWatch(app, params) {
       </div>
 
       <div class="suggestions-sidebar">
+      ${capsObj?.baseLanguages?.some(t => t.baseUrl) ? `
+        <div class="transcript-panel" id="transcript-panel" hidden>
+          <div class="transcript-header">
+            <span>Transcript</span>
+            <select class="filter-select" id="transcript-lang" ${capsObj.baseLanguages.filter(t => t.baseUrl).length < 2 ? 'hidden' : ''}>
+              ${capsObj.baseLanguages.filter(t => t.baseUrl).map((t, i) => `<option value="${i}">${escapeHtml(t.name || t.languageCode)}</option>`).join('')}
+            </select>
+            <button type="button" class="search-chip active" id="transcript-sync" title="Follow the video">Sync</button>
+            <button type="button" class="modal-close-btn" id="transcript-close" title="Close">&times;</button>
+          </div>
+          <div class="watch-transcript" id="transcript-list"></div>
+        </div>
+      ` : ''}
+      ${detailObj.liveChat ? `
+          <div class="live-chat-panel">
+            <div class="live-chat-header">
+              <span>${detailObj.liveChat.isReplay ? 'Chat Replay' : 'Live Chat'}</span>
+              <button type="button" id="live-chat-toggle" class="live-chat-toggle">Hide</button>
+              <span id="live-chat-status" class="live-chat-status"></span>
+              ${detailObj.liveChat.modes.length ? `<select id="live-chat-mode" class="live-chat-mode">${detailObj.liveChat.modes.map(m => `<option value="${escapeHtml(m.continuation)}" ${m.selected ? 'selected' : ''}>${escapeHtml(m.title)}</option>`).join('')}</select>` : ''}
+              ${detailObj.liveChat.isReplay ? '' : '<span class="live-chat-badge">● LIVE</span>'}
+            </div>
+            <div id="live-chat-messages" class="live-chat-messages"></div>
+          </div>
+      ` : ''}
         <div class="sidebar-header">
           ${listId && playlist ? `
             <a href="#/playlist?list=${listId}" class="sidebar-playlist-link">
               ${ICONS.listPlay} View full playlist
             </a>
+            ${playlistVideos.length > 1 ? `
+              <button id="shuffle-toggle" class="sidebar-shuffle-btn${shuffleOrder ? ' active' : ''}" title="Play this playlist in random order">
+                ${ICONS.shuffle} Shuffle
+              </button>
+            ` : ''}
           ` : ''}
-          <div class="sidebar-title">${sidebarTitle}</div>
+          <div class="sidebar-title" id="sidebar-title">${sidebarTitle}</div>
         </div>
-        <div class="sidebar-list">
-          ${sidebarVideos.map((s, i) => renderSuggestion(s, listId, i, currentIdx)).join('')}
+        <div class="sidebar-list" id="sidebar-list">
+          ${sidebarVideos.map((s, i) => renderSuggestion(s, listId, i, currentIdx, forceClient, audioParam)).join('')}
         </div>
       </div>
     </div>
   `;
+
+  const shuffleBtn = document.getElementById('shuffle-toggle');
+  if (shuffleBtn) {
+    shuffleBtn.addEventListener('click', () => {
+      if (shuffleOrder) {
+        stopShuffle(listId);
+        shuffleOrder = null;
+      } else {
+        shuffleOrder = startShuffle(listId, playlistVideos, videoId);
+      }
+      ({ videos: sidebarVideos, idx: currentIdx, next: nextVideos, title: sidebarTitle } = getListView());
+      document.getElementById('sidebar-title').innerHTML = sidebarTitle;
+      document.getElementById('sidebar-list').innerHTML = sidebarVideos
+        .map((s, i) => renderSuggestion(s, listId, i, currentIdx, forceClient, audioParam)).join('');
+      shuffleBtn.classList.toggle('active', !!shuffleOrder);
+    });
+  }
 
   const descBox = document.getElementById('watch-description');
   const descToggle = document.getElementById('desc-toggle');
@@ -331,23 +515,125 @@ export async function renderWatch(app, params) {
 
   vjsPlayer = window.vjsPlayer = videojs('vjs-video', {
     fluid: true,
+    poster: posterUrl,
     html5: { preloadTextTracks: false },
     playbackRates: [0.25, 0.5, 1, 1.25, 1.5, 2],
     controlBar: {
       currentTimeDisplay: true,
       timeDivider: true,
       durationDisplay: true,
-      remainingTimeDisplay: false
+      remainingTimeDisplay: false,
+      volumePanel: {
+        inline: false
+      }
     }
   });
 
-  const isLiveHls = !!streamsObj.hlsManifestUrl && (detailObj.isLivestream || !qualities.length);
+  const transcriptToggle = document.getElementById('transcript-toggle');
+  if (transcriptToggle) {
+    const panel = document.getElementById('transcript-panel');
+    const list = document.getElementById('transcript-list');
+    const langSelect = document.getElementById('transcript-lang');
+    const syncBtn = document.getElementById('transcript-sync');
+    const tracks = capsObj.baseLanguages.filter(t => t.baseUrl);
+    let rows = [];
+    let activeRow = null;
+    let sync = true;
+
+    const setOpen = (open) => {
+      panel.hidden = !open;
+      transcriptToggle.classList.toggle('active', open);
+      transcriptToggle.textContent = open ? 'Hide transcript' : 'Show transcript';
+      if (open && !rows.length) loadTranscript();
+    };
+
+    async function loadTranscript() {
+      list.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+      rows = [];
+      activeRow = null;
+      try {
+        const res = await fetch(`/api/v1/proxy/captions?format=json&url=${encodeURIComponent(tracks[langSelect.value].baseUrl)}`);
+        const { captions: raw = [], error } = await res.json();
+        const captions = [];
+        for (const c of raw) {
+          const content = c.content.replace(/\s+/g, ' ').trim();
+          if (content && content !== captions[captions.length - 1]?.content) captions.push({ ...c, content });
+        }
+        list.innerHTML = captions.length
+          ? captions.map(c => {
+            const t = Math.floor(c.startTime);
+            const stamp = `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+            return `<button class="transcript-row" data-t="${c.startTime}"><span class="transcript-time">${stamp}</span><span>${escapeHtml(c.content)}</span></button>`;
+          }).join('')
+          : `<p style="color:var(--text-muted);padding:8px;">${escapeHtml(error || 'No transcript available')}</p>`;
+        rows = [...list.querySelectorAll('.transcript-row')];
+        highlight();
+      } catch {
+        list.innerHTML = '<p style="color:var(--text-muted);padding:8px;">Failed to load transcript</p>';
+      }
+    }
+
+    function highlight() {
+      if (!rows.length || panel.hidden) return;
+      const now = vjsPlayer.currentTime();
+      let idx = rows.findIndex(r => parseFloat(r.dataset.t) > now) - 1;
+      if (idx < -1 || (idx === -1 && parseFloat(rows[0].dataset.t) <= now)) idx = rows.length - 1;
+      const row = rows[idx];
+      if (row === activeRow) return;
+      activeRow?.classList.remove('active');
+      activeRow = row || null;
+      if (!row) return;
+      row.classList.add('active');
+      if (sync) list.scrollTo({ top: row.offsetTop - list.clientHeight / 2 + row.clientHeight / 2, behavior: 'smooth' });
+    }
+
+    transcriptToggle.addEventListener('click', () => setOpen(panel.hidden));
+    document.getElementById('transcript-close').addEventListener('click', () => setOpen(false));
+    langSelect.addEventListener('change', loadTranscript);
+    syncBtn.addEventListener('click', () => {
+      sync = !sync;
+      syncBtn.classList.toggle('active', sync);
+      if (sync) { activeRow?.classList.remove('active'); activeRow = null; highlight(); }
+    });
+    list.addEventListener('click', (e) => {
+      const row = e.target.closest('.transcript-row');
+      if (row) vjsPlayer.currentTime(parseFloat(row.dataset.t));
+    });
+    vjsPlayer.on('timeupdate', highlight);
+  }
+
+  const isLive = detailObj.isLivestream || streamsObj.isLivestream || !!streamsObj.hlsManifestUrl;
+  const isLiveHls = !!streamsObj.hlsManifestUrl && isLive;
   if (isLiveHls) {
-    vjsPlayer.on('error', () => console.warn('[HLS]', vjsPlayer.error()));
-    vjsPlayer.src({ src: proxyHlsUrl(streamsObj.hlsManifestUrl), type: 'application/x-mpegURL' });
+    const hlsSource = { src: proxyHlsUrl(streamsObj.hlsManifestUrl), type: 'application/x-mpegURL' };
+    let hlsReloads = [];
+    const reloadHls = (reason) => {
+      const now = Date.now();
+      hlsReloads = hlsReloads.filter(t => now - t < 60000);
+      if (hlsReloads.length >= 5) return;
+      hlsReloads.push(now);
+      console.warn(`[HLS] ${reason}, reloading livestream`);
+      vjsPlayer.src(hlsSource);
+      vjsPlayer.ready(() => vjsPlayer.play()?.catch(() => {}));
+    };
+    vjsPlayer.on('error', () => {
+      console.warn('[HLS]', vjsPlayer.error());
+      reloadHls('player error');
+    });
+    vjsPlayer.on('ended', () => reloadHls('stream ended'));
+    vjsPlayer.src(hlsSource);
+    vjsPlayer.ready(() => {
+      vjsPlayer.play()?.catch(() => {});
+    });
   }
 
   if (detailObj.liveChat) {
+    const chatPanel = document.querySelector('.live-chat-panel');
+    const chatToggle = document.getElementById('live-chat-toggle');
+    chatToggle.addEventListener('click', () => {
+      chatPanel.classList.toggle('collapsed');
+      chatToggle.textContent = chatPanel.classList.contains('collapsed') ? 'Show' : 'Hide';
+    });
     stopChat = startLiveChat({
       videoId,
       chat: detailObj.liveChat,
@@ -366,7 +652,7 @@ export async function renderWatch(app, params) {
     if (!next) return;
     const nextId = next.videoId || next.id;
     if (nextId) {
-      window.location.hash = `#/watch?v=${nextId}${listId ? '&list=' + listId : ''}`;
+      window.location.hash = `#/watch?v=${nextId}${listId ? '&list=' + listId : ''}${clientParam}${audioParam}`;
     }
   };
   vjsPlayer.on('ended', playNext);
@@ -427,9 +713,10 @@ export async function renderWatch(app, params) {
   function addCaptions() {
     if (capsObj?.baseLanguages) {
       for (const track of capsObj.baseLanguages) {
+        if (!track.baseUrl) continue;
         vjsPlayer.addRemoteTextTrack({
           kind: 'captions', label: track.name, language: track.languageCode,
-          src: `/api/v1/captions/${videoId}/${track.languageCode}`, default: false
+          src: `/api/v1/proxy/captions?url=${encodeURIComponent(track.baseUrl)}`, default: false
         }, true);
       }
     }
@@ -479,6 +766,22 @@ export async function renderWatch(app, params) {
       audioTrackPlayer.playbackRate = vjsPlayer.playbackRate();
     }
   });
+  function syncVolumeUi() {
+    if (!vjsPlayer) return;
+    const vol = vjsPlayer.muted() ? 0 : vjsPlayer.volume();
+    const pct = Math.round(vol * 100);
+    const volLevel = vjsPlayer.el()?.querySelector('.vjs-volume-level');
+    const volBar = vjsPlayer.el()?.querySelector('.vjs-volume-bar');
+    if (volLevel) {
+      volLevel.style.width = `${pct}%`;
+      volLevel.style.height = `${pct}%`;
+    }
+    if (volBar) {
+      volBar.setAttribute('aria-valuenow', pct);
+      volBar.setAttribute('aria-valuetext', `${pct}%`);
+    }
+  }
+
   vjsPlayer.on('volumechange', () => {
     if (isSyncing) return;
     const newVolume = vjsPlayer.volume();
@@ -493,6 +796,7 @@ export async function renderWatch(app, params) {
       audioTrackPlayer.volume = newVolume;
       audioTrackPlayer.muted = newMuted;
     }
+    syncVolumeUi();
   });
 
   function handleSeekKey(e) {
@@ -555,6 +859,11 @@ export async function renderWatch(app, params) {
 
   vjsPlayer.volume(userVolume);
   vjsPlayer.muted(userMuted);
+  vjsPlayer.ready(syncVolumeUi);
+  vjsPlayer.on('loadedmetadata', syncVolumeUi);
+  setTimeout(syncVolumeUi, 50);
+  setTimeout(syncVolumeUi, 250);
+  setTimeout(syncVolumeUi, 600);
 
   if ('mediaSession' in navigator) {
     const session = navigator.mediaSession;
@@ -562,8 +871,8 @@ export async function renderWatch(app, params) {
       title: detailObj.title || '',
       artist: detailObj.author?.name || '',
       artwork: [{
-        src: new URL(proxyImageUrl(`https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`), location.href).href,
-        sizes: '480x360',
+        src: new URL(proxyImageUrl(`https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`), location.href).href,
+        sizes: '1280x720',
         type: 'image/jpeg',
       }],
     });
@@ -580,12 +889,12 @@ export async function renderWatch(app, params) {
       seekforward: () => vjsPlayer.currentTime(vjsPlayer.currentTime() + 10),
       seekto: (d) => vjsPlayer.currentTime(d.seekTime),
     };
-    const next = nextVideos[0];
-    if (next && (next.videoId || next.id)) {
-      actions.nexttrack = () => {
-        window.location.hash = `#/watch?v=${next.videoId || next.id}${listId ? '&list=' + listId : ''}`;
-      };
-    }
+    actions.nexttrack = () => {
+      const next = nextVideos[0];
+      if (next && idOf(next)) {
+        window.location.hash = `#/watch?v=${idOf(next)}${listId ? '&list=' + listId : ''}${clientParam}${audioParam}`;
+      }
+    };
     for (const [action, handler] of Object.entries(actions)) session.setActionHandler(action, handler);
   }
 
@@ -616,7 +925,7 @@ export async function renderWatch(app, params) {
 
   function renderSponsorMarkers() {
     if (!vjsPlayer) return;
-    const progressHolder = vjsPlayer.el().querySelector('.vjs-progress-holder');
+    const progressHolder = vjsPlayer.el()?.querySelector('.vjs-progress-holder');
     if (!progressHolder) return;
     let container = progressHolder.querySelector('.vjs-sponsor-markers-container');
     if (!container) {
@@ -632,8 +941,8 @@ export async function renderWatch(app, params) {
       if (sponsorMode(seg) === 'disabled') continue;
       const catInfo = SPONSOR_CATEGORIES[cat] || { name: cat, color: '#00d46a' };
       const start = Math.max(0, seg.segment[0]);
-      const end = Math.min(duration, seg.segment[1]);
-      if (start >= end) continue;
+      const end = Math.min(duration, Math.max(start + 0.1, seg.segment[1]));
+      if (start > end) continue;
       const left = (start / duration) * 100;
       const width = Math.max(0.3, ((end - start) / duration) * 100);
       const marker = document.createElement('div');
@@ -647,25 +956,176 @@ export async function renderWatch(app, params) {
   vjsPlayer.on('loadedmetadata', renderSponsorMarkers);
   vjsPlayer.on('durationchange', renderSponsorMarkers);
   setTimeout(renderSponsorMarkers, 500);
+  setTimeout(renderSponsorMarkers, 1500);
+
+  const onSettingsChanged = () => renderSponsorMarkers();
+  window.addEventListener('vivid-settings-changed', onSettingsChanged);
+  vjsPlayer.on('dispose', () => {
+    window.removeEventListener('vivid-settings-changed', onSettingsChanged);
+  });
+
+  let manualSeekInsideUuid = null;
+  vjsPlayer.on('seeking', () => {
+    const ct = vjsPlayer.currentTime();
+    const inside = sponsorSegments.find(s => ct >= s.segment[0] && ct < s.segment[1]);
+    manualSeekInsideUuid = inside ? (inside.UUID || `${inside.segment[0]}`) : null;
+  });
 
   vjsPlayer.on('timeupdate', () => {
     if (!sponsorSegments.length) return;
+    if (vjsPlayer.seeking && vjsPlayer.seeking()) return;
     const ct = vjsPlayer.currentTime();
     for (const seg of sponsorSegments) {
-      if (sponsorMode(seg) === 'skip_show' && ct >= seg.segment[0] && ct < seg.segment[1]) {
+      const mode = sponsorMode(seg);
+      if (mode.startsWith('skip') && ct >= seg.segment[0] && ct < seg.segment[1]) {
+        const segId = seg.UUID || `${seg.segment[0]}`;
+        if (manualSeekInsideUuid === segId) return;
         vjsPlayer.currentTime(seg.segment[1]);
         break;
       }
     }
+    const currentInside = sponsorSegments.find(s => ct >= s.segment[0] && ct < s.segment[1]);
+    if (!currentInside || (currentInside.UUID || `${currentInside.segment[0]}`) !== manualSeekInsideUuid) {
+      manualSeekInsideUuid = null;
+    }
   });
 
+  const rawStoryboards = streamsObj.storyboards || detailObj.storyboards;
+  const sbLevels = Array.isArray(rawStoryboards)
+    ? rawStoryboards.map(s => ({
+        width: s.width,
+        height: s.height,
+        count: s.count,
+        interval: s.interval,
+        cols: s.storyboardWidth || s.cols || 1,
+        rows: s.storyboardHeight || s.rows || 1,
+        framesPerSheet: (s.storyboardWidth || s.cols || 1) * (s.storyboardHeight || s.rows || 1),
+        sheets: s.sheets || (s.templateUrl ? Array.from({ length: s.storyboardCount || 1 }, (_, i) => s.templateUrl.replace('$M', String(i))) : [])
+      }))
+    : (rawStoryboards?.levels || []);
+
+  if (sbLevels.length) {
+    const candidateLevels = [...sbLevels].sort((a, b) => Math.abs(a.height - 90) - Math.abs(b.height - 90));
+    const sbLevel = candidateLevels[0] || sbLevels[0];
+    vjsPlayer.el()?.classList.add('vjs-has-storyboards');
+    const progressControl = vjsPlayer.el()?.querySelector('.vjs-progress-control');
+    const progressHolder = vjsPlayer.el()?.querySelector('.vjs-progress-holder');
+
+    if (progressControl && progressHolder && sbLevel) {
+      let sbTooltip = progressControl.querySelector('.vjs-storyboard-tooltip');
+      if (!sbTooltip) {
+        sbTooltip = document.createElement('div');
+        sbTooltip.className = 'vjs-storyboard-tooltip';
+        sbTooltip.style.display = 'none';
+        progressControl.appendChild(sbTooltip);
+      }
+
+      const onProgressHover = (e) => {
+        const dur = vjsPlayer.duration();
+        if (!dur || dur <= 0) return;
+        const rect = progressHolder.getBoundingClientRect();
+        const offsetX = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+        const pct = offsetX / rect.width;
+        const timeSec = pct * dur;
+        const timeMs = timeSec * 1000;
+
+        const frameIdx = Math.max(0, Math.min(Math.floor(timeMs / sbLevel.interval), sbLevel.count - 1));
+        const sheetIdx = Math.floor(frameIdx / (sbLevel.framesPerSheet || 1));
+        const frameInSheet = frameIdx % (sbLevel.framesPerSheet || 1);
+        const col = frameInSheet % (sbLevel.cols || 1);
+        const row = Math.floor(frameInSheet / (sbLevel.cols || 1));
+        const bgX = -(col * sbLevel.width);
+        const bgY = -(row * sbLevel.height);
+        const sheetUrl = sbLevel.sheets?.[sheetIdx];
+
+        if (sheetUrl) {
+          sbTooltip.style.display = 'flex';
+          sbTooltip.style.opacity = '1';
+          const clampedX = Math.max(sbLevel.width / 2, Math.min(offsetX, rect.width - (sbLevel.width / 2)));
+          sbTooltip.style.transform = `translateX(${clampedX}px) translateX(-50%)`;
+
+          const s = Math.floor(timeSec % 60).toString().padStart(2, '0');
+          const m = Math.floor((timeSec % 3600) / 60);
+          const h = Math.floor(timeSec / 3600);
+          const timeText = dur >= 3600 ? `${h}:${m.toString().padStart(2, '0')}:${s}` : `${m}:${s}`;
+
+          sbTooltip.innerHTML = `
+            <div class="vjs-storyboard-frame" style="width:${sbLevel.width}px;height:${sbLevel.height}px;background-image:url('${proxyImageUrl(sheetUrl)}');background-position:${bgX}px ${bgY}px;background-size:${sbLevel.cols * sbLevel.width}px ${sbLevel.rows * sbLevel.height}px;"></div>
+            <div class="vjs-storyboard-time">${timeText}</div>
+          `;
+        }
+      };
+
+      const onProgressLeave = () => {
+        if (sbTooltip) {
+          sbTooltip.style.opacity = '0';
+          sbTooltip.style.display = 'none';
+        }
+      };
+
+      progressControl.addEventListener('mousemove', onProgressHover);
+      progressControl.addEventListener('mouseenter', onProgressHover);
+      progressControl.addEventListener('mouseleave', onProgressLeave);
+
+      vjsPlayer.on('dispose', () => {
+        progressControl.removeEventListener('mousemove', onProgressHover);
+        progressControl.removeEventListener('mouseenter', onProgressHover);
+        progressControl.removeEventListener('mouseleave', onProgressLeave);
+      });
+    }
+  }
+
   async function setStream(q, audioChoice) {
+    currentActiveStream = q;
     const ct = vjsPlayer.currentTime() || 0;
     const paused = vjsPlayer.paused();
+
+    const playerWrapper = document.querySelector('.watch-player-wrapper');
+    if (playerWrapper) {
+      if (q.type === 'audio_direct' || (q.type === 'sabr' && !q.videoFmt)) {
+        playerWrapper.classList.add('audio-only-active');
+      } else if (!isAudioOnly) {
+        playerWrapper.classList.remove('audio-only-active');
+      }
+    }
 
     if (window.sabrPlayerInstance) {
       window.sabrPlayerInstance.destroy();
       window.sabrPlayerInstance = null;
+    }
+
+    if (q.type === 'audio_direct') {
+      isAudioTrackActive = false;
+      audioTrackPlayer.pause();
+      audioTrackPlayer.src = '';
+      if (!q.url) {
+        try {
+          const directStreams = await getStreams(videoId, false, forceClient || null);
+          const pool = (directStreams?.audioStreams || []).filter(a => a.url);
+          const best = pool.find(a => (a.mimeType || '').includes('mp4')) || pool[0];
+          if (best) {
+            q.url = best.url;
+            q.mimeType = best.mimeType;
+          }
+        } catch {}
+      }
+      const vidEl = vjsPlayer.tech({ IWillNotUseThisInPlugins: true })?.el() || vjsPlayer.el().querySelector('video');
+      if (vidEl && vidEl.src && vidEl.src.startsWith('blob:')) {
+        vidEl.removeAttribute('src');
+        vidEl.load();
+      }
+      const mime = (q.mimeType || '').toLowerCase();
+      const vjsType = mime.includes('webm') ? 'video/webm' : 'video/mp4';
+      vjsPlayer.src({ type: vjsType, src: proxyStreamUrl(q.url) });
+      if (ct > 0) {
+        vjsPlayer.one('loadedmetadata', () => {
+          try { vjsPlayer.currentTime(ct); } catch {}
+        });
+      }
+      vjsPlayer.ready(() => {
+        if (!paused) vjsPlayer.play()?.catch(() => {});
+      });
+      return;
     }
 
     const mp4Audio = q.type === 'adaptive' && audioChoice && q.mimeType?.includes('mp4')
@@ -686,7 +1146,7 @@ export async function renderWatch(app, params) {
       try {
         const vidEl = vjsPlayer.tech({ IWillNotUseThisInPlugins: true })?.el() || vjsPlayer.el().querySelector('video');
         const player = q.type === 'sabr'
-          ? new SabrMediaSourcePlayer({ video: vidEl, sabrInfo: q.sabrInfo, videoFmt: q.videoFmt, audioFmt: sabrAudioFor(q.videoFmt, audioChoice) })
+          ? new SabrMediaSourcePlayer({ video: vidEl, sabrInfo: q.sabrInfo, videoFmt: q.videoFmt || null, audioFmt: sabrAudioFor(q.videoFmt, audioChoice) })
           : new DashMediaSourcePlayer({
               video: vidEl,
               videoFmt: { url: proxyStreamUrl(q.url), mimeType: q.mimeType },
@@ -703,15 +1163,40 @@ export async function renderWatch(app, params) {
           window.sabrPlayerInstance.destroy();
           window.sabrPlayerInstance = null;
         }
+        const vidEl = vjsPlayer.tech({ IWillNotUseThisInPlugins: true })?.el() || vjsPlayer.el().querySelector('video');
+        if (vidEl) {
+          vidEl.removeAttribute('src');
+          vidEl.load();
+        }
         if (q.type === 'sabr') {
-          const fallback = qualities.find(x => x.type === 'adaptive' || x.type === 'combined');
-          if (fallback) setStream(fallback, audioChoice);
+          const fallback = qualities.find(x => x !== q && (x.type === 'adaptive' || x.type === 'combined' || x.type === 'audio_direct'));
+          if (fallback) {
+            setStream(fallback, audioChoice);
+            return;
+          }
+          if (isAudioOnly || !q.videoFmt) {
+            try {
+              const directStreams = await getStreams(videoId, false, forceClient || null);
+              const pool = (directStreams?.audioStreams || []).filter(x => x.url);
+              const best = pool.find(x => (x.mimeType || '').includes('mp4')) || pool[0];
+              if (best) {
+                setStream({ label: 'Audio Only', url: best.url, mimeType: best.mimeType, type: 'audio_direct' }, best);
+                return;
+              }
+            } catch {}
+          }
           return;
         }
       }
     }
 
-    vjsPlayer.src({ type: 'video/mp4', src: proxyStreamUrl(q.url) });
+    const vidEl = vjsPlayer.tech({ IWillNotUseThisInPlugins: true })?.el() || vjsPlayer.el().querySelector('video');
+    if (vidEl && vidEl.src && vidEl.src.startsWith('blob:')) {
+      vidEl.removeAttribute('src');
+      vidEl.load();
+    }
+
+    vjsPlayer.src({ type: q.mimeType || 'video/mp4', src: proxyStreamUrl(q.url) });
 
     if (q.type === 'adaptive') {
       isAudioTrackActive = true;
@@ -755,7 +1240,16 @@ export async function renderWatch(app, params) {
   document.getElementById('ps-audio').addEventListener('change', (e) => {
     const q = qualities[document.getElementById('ps-quality').value];
     const a = audioOptions[e.target.value];
-    if (q?.type === 'sabr' || (q?.type === 'adaptive' && window.sabrPlayerInstance)) {
+    if (q?.type === 'audio_direct') {
+      const match = audioOptions.find(opt => opt.url && trackKey(opt) === trackKey(a) && (opt.mimeType || '').includes('mp4'))
+        || audioOptions.find(opt => opt.url && trackKey(opt) === trackKey(a))
+        || a;
+      if (match?.url) {
+        q.url = match.url;
+        q.mimeType = match.mimeType;
+        setStream(q, match);
+      }
+    } else if (q?.type === 'sabr' || (q?.type === 'adaptive' && window.sabrPlayerInstance)) {
       setStream(q, a);
     } else if (q?.type === 'adaptive') {
       audioTrackPlayer.src = proxyStreamUrl(a.url);
@@ -774,6 +1268,25 @@ export async function renderWatch(app, params) {
     vjsPlayer.loop(e.target.checked);
   });
 
+  const listenToggle = document.getElementById('listen-mode-toggle');
+  if (listenToggle) {
+    listenToggle.addEventListener('click', () => {
+      let target = `#/watch?v=${videoId}${listId ? '&list=' + listId : ''}${clientParam}`;
+      if (!isAudioOnly) target += '&audio=1';
+      window.location.hash = target;
+    });
+    listenToggle.addEventListener('mouseenter', () => {
+      listenToggle.style.background = 'var(--bg-tertiary)';
+      listenToggle.style.borderColor = 'var(--accent)';
+      listenToggle.style.color = 'var(--accent)';
+    });
+    listenToggle.addEventListener('mouseleave', () => {
+      listenToggle.style.background = 'none';
+      listenToggle.style.borderColor = 'var(--border)';
+      listenToggle.style.color = 'var(--text-secondary)';
+    });
+  }
+
   const savePlBtn = document.getElementById('save-pl-btn');
   if (savePlBtn) {
     savePlBtn.addEventListener('click', () => {
@@ -781,7 +1294,11 @@ export async function renderWatch(app, params) {
         videoId,
         title: detailObj.title || '',
         author: detailObj.author?.name || '',
-        thumbnailUrl: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+        authorId: detailObj.author?.id || '',
+        authorUrl: detailObj.author?.id ? `/channel/${detailObj.author.id}` : '',
+        views: detailObj.views || '',
+        publishDate: detailObj.publishDate || '',
+        thumbnailUrl: `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
         duration: detailObj.duration || '',
       });
     });
@@ -797,6 +1314,35 @@ export async function renderWatch(app, params) {
       savePlBtn.style.borderColor = 'var(--border)';
       savePlBtn.style.color = 'var(--text-secondary)';
     });
+  }
+
+  const downloadBtn = document.getElementById('download-btn');
+  if (downloadBtn) {
+    if (detailObj.isLivestream) {
+      downloadBtn.style.display = 'none';
+    } else {
+      downloadBtn.addEventListener('click', () => {
+        openDownloadModal({
+          videoId,
+          title: detailObj.title || '',
+          author: detailObj.author?.name || '',
+          thumbnailUrl: detailObj.thumbnailUrl || `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
+          duration: detailObj.duration || 0,
+        }, streamsObj, currentActiveStream, forceClient);
+      });
+
+      downloadBtn.addEventListener('mouseenter', () => {
+        downloadBtn.style.background = 'var(--bg-tertiary)';
+        downloadBtn.style.borderColor = 'var(--accent)';
+        downloadBtn.style.color = 'var(--accent)';
+      });
+
+      downloadBtn.addEventListener('mouseleave', () => {
+        downloadBtn.style.background = 'none';
+        downloadBtn.style.borderColor = 'var(--border)';
+        downloadBtn.style.color = 'var(--text-secondary)';
+      });
+    }
   }
 
   const watchSubBtn = document.getElementById('watch-sub-btn');
@@ -832,7 +1378,7 @@ export async function renderWatch(app, params) {
   const shareBtn = document.getElementById('share-btn');
   if (shareBtn) {
     shareBtn.addEventListener('click', () => {
-      const shareUrl = `${window.location.origin}${window.location.pathname}#/watch?v=${videoId}${listId ? '&list=' + listId : ''}`;
+      const shareUrl = `${window.location.origin}${window.location.pathname}#/watch?v=${videoId}${listId ? '&list=' + listId : ''}${clientParam}`;
       const shareText = `Check out: ${detailObj.title}`;
 
       if (navigator.share) {
@@ -875,6 +1421,7 @@ export async function renderWatch(app, params) {
   if (loadCommentsBtn) {
     let commentToken = detailObj.comments?.continuationToken || '';
     let commentType = detailObj.comments?.type ?? 1;
+    const authorIcon = detailObj.author?.iconUrl || '';
     loadCommentsBtn.addEventListener('click', async () => {
       loadCommentsBtn.textContent = 'Loading...';
       if (!detailObj.isLivestream) {
@@ -882,13 +1429,13 @@ export async function renderWatch(app, params) {
           const data = await getComments(videoId, commentToken || undefined, commentType);
           const list = document.getElementById('comments-list');
           for (const c of data.comments || []) {
-            list.insertAdjacentHTML('beforeend', renderComment(c, videoId));
+            list.insertAdjacentHTML('beforeend', renderComment(c, videoId, false, authorIcon));
           }
           commentToken = data.continuationToken || '';
           commentType = data.type ?? -1;
           if (!commentToken || commentType === -1) loadCommentsBtn.remove();
           else loadCommentsBtn.textContent = 'Load more';
-          attachReplyListeners(videoId);
+          attachReplyListeners(videoId, authorIcon);
         } catch (e) {
           loadCommentsBtn.textContent = 'Error, retry';
         }
@@ -903,7 +1450,27 @@ export async function renderWatch(app, params) {
   return stopPlayback;
 }
 
-function attachReplyListeners(videoId) {
+function renderDescriptionSections(sections = []) {
+  return sections.map(sec => `
+    <div class="watch-extra">
+      <h3 class="watch-extra-title">${escapeHtml(sec.title || '')}</h3>
+      ${sec.subtitle ? `<p class="watch-extra-sub">${escapeHtml(sec.subtitle)}</p>` : ''}
+      <div class="watch-attributes">
+        ${sec.items.map(i => {
+          const inner = `
+            ${i.imageUrl ? `<img src="${proxyImageUrl(i.imageUrl)}" alt="" loading="lazy">` : ''}
+            <div class="watch-attribute-info">
+              <div>${escapeHtml(i.title)}</div>
+              ${[i.subtitle, i.secondarySubtitle].filter(Boolean).map(t => `<div class="watch-attribute-sub">${escapeHtml(t)}</div>`).join('')}
+            </div>`;
+          return i.url ? `<a href="#${i.url}" class="watch-attribute">${inner}</a>` : `<div class="watch-attribute">${inner}</div>`;
+        }).join('')}
+      </div>
+    </div>
+  `).join('');
+}
+
+export function attachReplyListeners(videoId, authorIcon = '', web = false) {
   document.querySelectorAll('.load-replies-btn:not(.bound)').forEach(btn => {
     btn.classList.add('bound');
     btn.addEventListener('click', async () => {
@@ -911,9 +1478,9 @@ function attachReplyListeners(videoId) {
       const target = document.getElementById(btn.getAttribute('data-target'));
       btn.textContent = 'Loading...';
       try {
-        const data = await getCommentReplies(videoId, token);
+        const data = await getCommentReplies(videoId, token, web);
         for (const r of data.replies || []) {
-          target.insertAdjacentHTML('beforeend', renderComment(r, videoId, true));
+          target.insertAdjacentHTML('beforeend', renderComment(r, videoId, true, authorIcon));
         }
         if (data.continuationToken) {
           btn.setAttribute('data-token', data.continuationToken);
@@ -921,7 +1488,7 @@ function attachReplyListeners(videoId) {
         } else {
           btn.remove();
         }
-        attachReplyListeners(videoId);
+        attachReplyListeners(videoId, authorIcon, web);
       } catch(e) {
         btn.textContent = 'Error';
       }
@@ -929,29 +1496,46 @@ function attachReplyListeners(videoId) {
   });
 }
 
-function renderSuggestion(s, listId, i, currentIdx) {
+function renderSuggestion(s, listId, i, currentIdx, forceClient = '', audioParam = '') {
   if (!s) return '';
   const videoId = s.videoId || s.id;
   if (!videoId) return '';
-  const href = `#/watch?v=${videoId}${listId ? '&list=' + listId : ''}`;
+  const clientParam = forceClient ? `&forceclient=${encodeURIComponent(forceClient)}` : '';
+  const href = `#/watch?v=${videoId}${listId ? '&list=' + listId : ''}${clientParam}${audioParam}`;
   const isPlaying = listId && i === currentIdx;
   const isNext = listId ? i === currentIdx + 1 : i === 0;
 
+  const authorName = s.author || s.authorName || '';
+  const channelHref = s.authorId
+    ? `#/channel/${encodeURIComponent(s.authorId)}`
+    : (s.authorUrl ? `#${s.authorUrl.startsWith('/') ? s.authorUrl : '/' + s.authorUrl}` : '');
+
+  const authorHtml = authorName
+    ? (channelHref
+        ? `<a href="${channelHref}" class="suggestion-author" onclick="event.stopPropagation();">${escapeHtml(authorName)}${verifiedBadge(s.verified)}</a>`
+        : `<span class="suggestion-author">${escapeHtml(authorName)}${verifiedBadge(s.verified)}</span>`)
+    : '';
+
+  const statsHtml = s.views ? `<span class="suggestion-stats">${escapeHtml(s.views)}</span>` : '';
+
   return `
-    <a href="${href}" class="suggestion-item${isPlaying ? ' suggestion-playing' : ''}${isNext ? ' suggestion-next' : ''}">
-      <div class="suggestion-thumb">
+    <div class="suggestion-item${isPlaying ? ' suggestion-playing' : ''}${isNext ? ' suggestion-next' : ''}" onclick="if (!event.target.closest('a')) location.hash = '${href}';" style="cursor:pointer;">
+      <a href="${href}" class="suggestion-thumb" tabindex="-1">
         <img src="${proxyImageUrl(s.thumbnailUrl || '')}" alt="" loading="lazy">
         ${s.duration ? `<span class="video-card-duration">${escapeHtml(s.duration)}</span>` : ''}
-      </div>
+      </a>
       <div class="suggestion-info">
-        <div class="suggestion-title">${escapeHtml(s.title || '')}</div>
-        <div class="suggestion-meta">${escapeHtml(s.author || s.authorName || '')}</div>
+        <a href="${href}" class="suggestion-title">${escapeHtml(s.title || '')}</a>
+        <div class="suggestion-meta">
+          ${authorHtml}
+          ${statsHtml}
+        </div>
       </div>
-    </a>
+    </div>
   `;
 }
 
-function renderComment(c, videoId, isReply = false) {
+export function renderComment(c, videoId, isReply = false, channelAuthorIcon = '') {
   const ownerHtml = c.authorIsChannelOwner
     ? `<span style="background:#444;color:#fff;padding:1px 5px;border-radius:3px;font-size:0.7rem;margin-left:4px;">Owner</span>`
     : '';
@@ -959,7 +1543,10 @@ function renderComment(c, videoId, isReply = false) {
     ? `<span style="display:inline-flex;align-items:center;gap:3px;font-size:0.7rem;background:var(--bg-tertiary);padding:2px 6px;border-radius:10px;margin-left:4px;border:1px solid var(--border);">${ICONS.pin} Pinned</span>`
     : '';
   const heartHtml = c.creatorHeart
-    ? `<span style="display:inline-flex;align-items:center;margin-left:6px;" title="Liked by creator">${ICONS.heart}</span>`
+    ? `<span class="creator-heart-badge" title="Liked by creator">
+        <img src="${proxyImageUrl(c.creatorHeartIcon || channelAuthorIcon || '')}" class="creator-heart-avatar" alt="" loading="lazy">
+        <span class="creator-heart-icon">${ICONS.heart}</span>
+       </span>`
     : '';
   const rid = 'replies-' + Math.random().toString(36).substr(2, 9);
 
@@ -974,7 +1561,7 @@ function renderComment(c, videoId, isReply = false) {
   }
 
   return `
-    <div class="comment ${isReply ? 'comment-reply' : ''}" ${isReply ? 'style="margin-left:32px;border-left:2px solid var(--border);padding-left:12px;margin-top:8px;"' : ''}>
+    <div class="comment ${isReply ? 'comment-reply' : ''}" ${isReply ? 'style="margin-top:6px;"' : ''}>
       <div class="comment-avatar">
         <img src="${proxyImageUrl(c.authorIconUrl || '')}" alt="" loading="lazy">
       </div>
@@ -985,7 +1572,7 @@ function renderComment(c, videoId, isReply = false) {
             : `<span class="comment-author">${escapeHtml(c.authorName || '')}${ownerHtml}</span>`
           }
           ${pinHtml}
-          <span class="comment-date" style="font-size:0.72rem;">${escapeHtml(c.publishDate || '')}</span>
+          <span class="comment-date">${escapeHtml(c.publishDate || '')}</span>
         </div>
         <div class="comment-text" style="overflow-wrap: break-word;">${linkifyComment(c.content || '')}</div>
         <div class="comment-footer">
@@ -1071,4 +1658,510 @@ function openSavePlaylistModal(videoObj) {
     if (e.target === modal) modal.remove();
   });
   document.body.appendChild(modal);
+}
+
+function formatBytes(bytes) {
+  if (!bytes || isNaN(bytes) || bytes <= 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  let val = Number(bytes);
+  while (val >= 1024 && i < units.length - 1) {
+    val /= 1024;
+    i++;
+  }
+  return `${val.toFixed(val >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function openDownloadModal(videoObj, streamsObj, currentActiveStream, forceClient = '') {
+  const existing = document.getElementById('download-video-modal');
+  if (existing) existing.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'download-video-modal';
+  modal.className = 'modal-backdrop';
+
+  const safeTitle = (videoObj.title || 'video').replace(/[/\\?%*:|"<>]/g, '_').trim();
+  const vidId = videoObj.videoId || '';
+
+  const isSabrMode = currentActiveStream?.type === 'sabr'
+    || (typeof SabrMediaSourcePlayer !== 'undefined' && window.sabrPlayerInstance instanceof SabrMediaSourcePlayer)
+    || (streamsObj?.sabr?.available && !streamsObj?.videoStreams?.some(s => s.url && !s.isSabr));
+
+  modal.innerHTML = `
+    <div class="modal-box" style="max-width:520px; width:92%;">
+      <div class="modal-header">
+        <h2 class="modal-title" style="display:flex;align-items:center;gap:8px;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          Download Video
+        </h2>
+        <button class="modal-close-btn" id="dl-modal-close">&times;</button>
+      </div>
+      <div class="modal-body" style="padding:1rem 1.25rem;">
+        <div id="dl-content-container">
+          <div style="display:flex;align-items:center;justify-content:center;padding:2rem;gap:10px;color:var(--text-muted);">
+            <div class="spinner"></div>
+            <span>Loading stream options...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  let abortCtrl = null;
+  const close = () => {
+    if (abortCtrl) {
+      abortCtrl.abort();
+      abortCtrl = null;
+    }
+    modal.remove();
+  };
+  modal.querySelector('#dl-modal-close').addEventListener('click', close);
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) close();
+  });
+
+  const gatherStreams = async () => {
+    let direct = streamsObj?.videoStreams?.some(s => s.url) ? streamsObj : null;
+    let sabr = streamsObj?.sabr?.available ? streamsObj : null;
+
+    const fetches = [];
+    if (isSabrMode) {
+      if (!sabr) {
+        fetches.push(
+          getStreams(vidId, true, forceClient || null)
+            .then(s => { if (s && !s.error && s.sabr?.available) sabr = s; })
+            .catch(() => {})
+        );
+      }
+      if (!direct?.combinedStreams?.length && !direct?.videoStreams?.some(s => s.itag === 18 && s.url)) {
+        fetches.push(
+          getStreams(vidId, false, forceClient || null)
+            .then(d => { if (d && !d.error) direct = d; })
+            .catch(() => {})
+        );
+      }
+    } else {
+      if (!direct) {
+        fetches.push(
+          getStreams(vidId, false, forceClient || null)
+            .then(d => { if (d && !d.error) direct = d; })
+            .catch(() => {})
+        );
+      }
+    }
+    if (fetches.length) {
+      await Promise.all(fetches);
+    }
+
+    return { direct, sabr };
+  };
+
+  const fitsFormat = (stream, format) => {
+    const mime = (stream.mimeType || '').toLowerCase();
+    if (format === 'mp4') return mime.includes('mp4');
+    if (format === 'webm') return mime.includes('webm');
+    return true;
+  };
+
+  const pickAudio = (list, format, best) => {
+    const sorted = [...list].sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+    if (format === 'mkv' || format === 'mp3') return best || sorted[0] || null;
+    return sorted.find(a => fitsFormat(a, format)) || (format === 'mp4' ? sorted[0] : null) || null;
+  };
+
+  const buildOptions = (format, { direct, sabr }) => {
+    const { ext, audioExt } = DOWNLOAD_FORMATS[format];
+    const options = [];
+
+    if (format === 'mp4') {
+      const itag18 = direct?.combinedStreams?.find(f => f.itag === 18 && f.url)
+        || streamsObj?.combinedStreams?.find(f => f.itag === 18 && f.url)
+        || direct?.videoStreams?.find(f => f.itag === 18 && f.url);
+
+      if (itag18?.url) {
+        options.push({
+          id: 'itag18',
+          group: 'Direct',
+          label: '360p (MP4)',
+          type: 'direct',
+          stream: itag18,
+          filename: `${safeTitle} [${vidId}] (360p).mp4`,
+        });
+      }
+    }
+
+    if (format !== 'mp3') {
+      const seenRes = new Set();
+      const uniqueByRes = (videos) => [...videos]
+        .sort((a, b) => (b.height || 0) - (a.height || 0) || (b.bitrate || 0) - (a.bitrate || 0))
+        .filter(v => {
+          const res = v.height || parseInt(v.qualityLabel, 10) || 0;
+          if (!res) return true;
+          if (seenRes.has(res)) return false;
+          seenRes.add(res);
+          return true;
+        });
+
+      if (isSabrMode) {
+        if (sabr?.sabr?.available && sabr.videoStreams?.length) {
+          const sabrAudio = pickAudio(sabr.audioStreams || [], format, sabr.bestAudio);
+          for (const v of uniqueByRes(sabr.videoStreams.filter(x => fitsFormat(x, format)))) {
+            const qLabel = v.qualityLabel || `${v.height}p`;
+            options.push({
+              id: `sabr-${v.itag}`,
+              group: 'SABR',
+              label: qLabel,
+              type: 'sabr',
+              format,
+              sabrInfo: { ...sabr.sabr, clientName: sabr.sabr?.clientName || (forceClient ? forceClient.toUpperCase() : 'WEB') },
+              videoFmt: v,
+              audioFmt: sabrAudio,
+              filename: `${safeTitle} [${vidId}] (${qLabel}).${ext}`,
+            });
+          }
+        }
+      } else if (direct?.videoStreams?.length) {
+        const directAudio = pickAudio((direct.audioStreams || []).filter(a => a.url), format, direct.bestAudio);
+        const aBytes = directAudio ? (directAudio.contentLength || (directAudio.bitrate && videoObj.duration ? Math.round((directAudio.bitrate * videoObj.duration) / 8) : 0)) : 0;
+        const videos = direct.videoStreams.filter(v => v.url && !v.isSabr && fitsFormat(v, format));
+        for (const v of uniqueByRes(videos)) {
+          const vBytes = v.contentLength || (v.bitrate && videoObj.duration ? Math.round((v.bitrate * videoObj.duration) / 8) : 0);
+          const qLabel = v.qualityLabel || `${v.height}p`;
+          options.push({
+            id: `adaptive-${v.itag}`,
+            group: 'DASH',
+            label: qLabel,
+            type: 'adaptive',
+            format,
+            videoStream: v,
+            audioStream: directAudio,
+            filename: `${safeTitle} [${vidId}] (${qLabel}).${ext}`,
+            vBytes,
+            aBytes,
+          });
+        }
+      }
+    }
+
+    const audioPool = [...(direct?.audioStreams || []), ...(sabr?.audioStreams || [])].filter(a => a.url);
+    const anyAudio = pickAudio(audioPool, format, direct?.bestAudio?.url ? direct.bestAudio : null);
+    if (anyAudio?.url) {
+      options.push({
+        id: 'audio-only',
+        group: 'Audio',
+        label: 'Audio',
+        type: 'audio',
+        format,
+        audioStream: anyAudio,
+        filename: `${safeTitle} [${vidId}] (Audio).${audioExt}`,
+      });
+    }
+
+    return options;
+  };
+
+  gatherStreams().then(sources => {
+    const container = modal.querySelector('#dl-content-container');
+    if (!container) return;
+
+    let format = Object.keys(DOWNLOAD_FORMATS).find(f => buildOptions(f, sources).length);
+    let options = format ? buildOptions(format, sources) : [];
+
+    if (!options.length) {
+      container.innerHTML = `
+        <div style="text-align:center;padding:1.5rem 0;color:var(--text-muted);">
+          <p style="margin-bottom:1rem;color:var(--text-primary);font-weight:600;">No download streams available</p>
+          <p style="font-size:0.85rem;margin-bottom:1.5rem;">Could not resolve any downloadable stream for this video.</p>
+          <button id="dl-err-close" class="modal-btn-primary">Close</button>
+        </div>
+      `;
+      modal.querySelector('#dl-err-close')?.addEventListener('click', close);
+      return;
+    }
+
+    let selected = options[0];
+
+    const renderSelectOptions = () => {
+      let html = '';
+      const groups = {};
+      for (const opt of options) {
+        const grp = opt.group || 'Options';
+        (groups[grp] ||= []).push(opt);
+      }
+      for (const [grpName, grpOpts] of Object.entries(groups)) {
+        html += `<optgroup label="${escapeHtml(grpName)}">`;
+        for (const opt of grpOpts) {
+          const sel = opt.id === selected?.id ? 'selected' : '';
+          html += `<option value="${escapeHtml(opt.id)}" ${sel}>${escapeHtml(opt.label)}</option>`;
+        }
+        html += `</optgroup>`;
+      }
+      return html;
+    };
+
+    container.innerHTML = `
+      <div style="display:flex;gap:12px;background:var(--bg-tertiary);padding:10px;border-radius:8px;margin-bottom:1rem;align-items:center;">
+        <img src="${proxyImageUrl(videoObj.thumbnailUrl || '')}" style="width:110px;aspect-ratio:16/9;object-fit:cover;border-radius:6px;flex-shrink:0;" alt="">
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:600;font-size:0.88rem;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:3px;">${escapeHtml(videoObj.title)}</div>
+          <div style="font-size:0.78rem;color:var(--text-muted);">${escapeHtml(videoObj.author || '')}</div>
+        </div>
+      </div>
+
+      <div style="margin-bottom:1rem;">
+        <label for="dl-container-select" style="display:block;font-size:0.8rem;font-weight:600;color:var(--text-secondary);margin-bottom:6px;">Select Format:</label>
+        <select id="dl-container-select" style="width:100%;padding:8px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-size:0.86rem;outline:none;cursor:pointer;">
+          ${Object.entries(DOWNLOAD_FORMATS).map(([key, f]) => `<option value="${key}" ${key === format ? 'selected' : ''}>${f.label}</option>`).join('')}
+        </select>
+      </div>
+
+      <div style="margin-bottom:1rem;">
+        <label for="dl-format-select" style="display:block;font-size:0.8rem;font-weight:600;color:var(--text-secondary);margin-bottom:6px;">Select Quality:</label>
+        <select id="dl-format-select" style="width:100%;padding:8px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-size:0.86rem;outline:none;cursor:pointer;">
+          ${renderSelectOptions()}
+        </select>
+      </div>
+
+      <div id="dl-status-area" style="margin-bottom:1.25rem;">
+        <div id="dl-progress-box" style="display:none;margin-top:0.75rem;">
+          <div style="display:flex;justify-content:space-between;font-size:0.8rem;margin-bottom:5px;font-weight:600;">
+            <span id="dl-progress-label">Downloading...</span>
+            <span id="dl-progress-percent">0%</span>
+          </div>
+          <div style="width:100%;height:8px;background:var(--bg-tertiary);border-radius:4px;overflow:hidden;position:relative;">
+            <div id="dl-progress-bar" style="width:0%;height:100%;background:var(--accent);transition:width 0.15s ease;border-radius:4px;"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:var(--text-muted);margin-top:6px;">
+            <span id="dl-progress-bytes">0 MB</span>
+            <span id="dl-progress-speed"></span>
+          </div>
+        </div>
+        <div id="dl-status-msg" style="font-size:0.82rem;margin-top:6px;display:none;"></div>
+      </div>
+
+      <div style="display:flex;gap:10px;justify-content:flex-end;align-items:center;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:12px;">
+        <button id="dl-cancel-btn" class="modal-btn-secondary" style="display:none;">Cancel</button>
+        <a id="dl-direct-btn" href="#" download="" class="modal-btn-secondary" style="text-decoration:none;display:inline-flex;align-items:center;gap:6px;">
+          Direct Download
+        </a>
+        <button id="dl-start-btn" class="modal-btn-primary" style="display:inline-flex;align-items:center;gap:6px;">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          <span id="dl-start-btn-text">Download</span>
+        </button>
+        <button id="dl-done-btn" class="modal-btn-primary" style="display:none;">Done</button>
+      </div>
+    `;
+
+    const selectEl = container.querySelector('#dl-format-select');
+    const formatEl = container.querySelector('#dl-container-select');
+    const startBtn = container.querySelector('#dl-start-btn');
+    const startBtnText = container.querySelector('#dl-start-btn-text');
+    const directBtn = container.querySelector('#dl-direct-btn');
+    const cancelBtn = container.querySelector('#dl-cancel-btn');
+    const doneBtn = container.querySelector('#dl-done-btn');
+    const progressBox = container.querySelector('#dl-progress-box');
+    const progressBar = container.querySelector('#dl-progress-bar');
+    const progressPercent = container.querySelector('#dl-progress-percent');
+    const progressLabel = container.querySelector('#dl-progress-label');
+    const progressBytes = container.querySelector('#dl-progress-bytes');
+    const progressSpeed = container.querySelector('#dl-progress-speed');
+    const statusMsg = container.querySelector('#dl-status-msg');
+
+    const updateSelectedUI = () => {
+      startBtn.disabled = !selected;
+      if (selected?.type === 'direct') {
+        directBtn.style.display = 'inline-flex';
+        directBtn.href = proxyStreamUrl(selected.stream.url, selected.filename);
+        directBtn.download = selected.filename;
+        startBtnText.textContent = 'Download';
+      } else {
+        directBtn.style.display = 'none';
+        startBtnText.textContent = 'Download';
+      }
+    };
+
+    updateSelectedUI();
+
+    formatEl.addEventListener('change', () => {
+      format = formatEl.value;
+      options = buildOptions(format, sources);
+      selected = options[0] || null;
+      selectEl.innerHTML = options.length ? renderSelectOptions() : '<option>No streams for this format</option>';
+      updateSelectedUI();
+    });
+
+    selectEl.addEventListener('change', () => {
+      const match = options.find(o => o.id === selectEl.value);
+      if (match) {
+        selected = match;
+        updateSelectedUI();
+      }
+    });
+
+    doneBtn.addEventListener('click', close);
+
+    cancelBtn.addEventListener('click', () => {
+      if (abortCtrl) {
+        abortCtrl.abort();
+        abortCtrl = null;
+      }
+      progressBox.style.display = 'none';
+      selectEl.disabled = formatEl.disabled = false;
+      startBtn.style.display = 'inline-flex';
+      cancelBtn.style.display = 'none';
+      if (selected.type === 'direct') directBtn.style.display = 'inline-flex';
+      statusMsg.textContent = 'Download cancelled.';
+      statusMsg.style.color = 'var(--text-muted)';
+      statusMsg.style.display = 'block';
+    });
+
+    const triggerSave = (blob, filename) => {
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        a.remove();
+        URL.revokeObjectURL(blobUrl);
+      }, 3000);
+    };
+
+    startBtn.addEventListener('click', async () => {
+      selectEl.disabled = formatEl.disabled = true;
+      startBtn.style.display = 'none';
+      directBtn.style.display = 'none';
+      cancelBtn.style.display = 'inline-block';
+      progressBox.style.display = 'block';
+      statusMsg.style.display = 'none';
+      progressBar.style.width = '0%';
+      progressBar.style.background = 'var(--accent)';
+      progressPercent.textContent = '0%';
+      progressLabel.textContent = 'Starting download...';
+      progressBytes.textContent = '';
+      progressSpeed.textContent = '';
+
+      abortCtrl = new AbortController();
+      const startTime = Date.now();
+
+      try {
+        if (selected.type === 'direct') {
+          progressLabel.textContent = 'Downloading stream...';
+          const proxyDownloadUrl = proxyStreamUrl(selected.stream.url, selected.filename);
+          const blob = await fetchStreamBlob(proxyDownloadUrl, selected.approxBytes, (received, total) => {
+            const pct = total > 0 ? Math.min(100, Math.round((received / total) * 100)) : 0;
+            progressBar.style.width = total > 0 ? `${pct}%` : '100%';
+            progressPercent.textContent = total > 0 ? `${pct}%` : formatBytes(received);
+            progressBytes.textContent = total > 0 ? `${formatBytes(received)} / ${formatBytes(total)}` : formatBytes(received);
+            const elapsed = (Date.now() - startTime) / 1000;
+            if (elapsed > 0.5) progressSpeed.textContent = `${formatBytes(received / elapsed)}/s`;
+          }, abortCtrl.signal);
+          triggerSave(blob, selected.filename);
+        } else if (selected.type === 'adaptive') {
+          const videoUrl = proxyStreamUrl(selected.videoStream.url);
+          const audioUrl = selected.audioStream?.url ? proxyStreamUrl(selected.audioStream.url) : null;
+
+          const blob = await downloadAdaptive({
+            format: selected.format,
+            videoUrl,
+            audioUrl,
+            approxVideoBytes: selected.vBytes,
+            approxAudioBytes: selected.aBytes,
+            onProgress: (p) => {
+              if (p.phase === 'downloading') {
+                progressLabel.textContent = 'Downloading video & audio streams...';
+                progressBar.style.width = `${p.percent}%`;
+                progressPercent.textContent = `${p.percent}%`;
+                progressBytes.textContent = p.total > 0 ? `${formatBytes(p.bytes)} / ${formatBytes(p.total)}` : formatBytes(p.bytes);
+                const elapsed = (Date.now() - startTime) / 1000;
+                if (elapsed > 0.5) progressSpeed.textContent = `${formatBytes(p.bytes / elapsed)}/s`;
+              } else if (p.phase === 'merging') {
+                progressLabel.textContent = `Merging streams into ${selected.format.toUpperCase()} in browser...`;
+                progressBar.style.width = `${p.percent}%`;
+                progressPercent.textContent = `${p.percent}%`;
+                progressSpeed.textContent = 'Muxing...';
+              }
+            },
+            abortSignal: abortCtrl.signal,
+          });
+
+          triggerSave(blob, selected.filename);
+        } else if (selected.type === 'sabr') {
+          const blob = await downloadSabr({
+            format: selected.format,
+            videoId: vidId,
+            sabrInfo: selected.sabrInfo,
+            videoFmt: selected.videoFmt,
+            audioFmt: selected.audioFmt,
+            duration: videoObj.duration,
+            onProgress: (p) => {
+              if (p.phase === 'downloading') {
+                progressLabel.textContent = 'Downloading streams via SABR...';
+                progressBar.style.width = `${p.percent}%`;
+                progressPercent.textContent = `${p.percent}%`;
+                progressBytes.textContent = formatBytes(p.bytes);
+                const elapsed = (Date.now() - startTime) / 1000;
+                if (elapsed > 0.5) progressSpeed.textContent = `${formatBytes(p.bytes / elapsed)}/s`;
+              } else if (p.phase === 'merging') {
+                progressLabel.textContent = `Merging SABR streams into ${selected.format.toUpperCase()} in browser...`;
+                progressBar.style.width = `${p.percent}%`;
+                progressPercent.textContent = `${p.percent}%`;
+                progressSpeed.textContent = 'Muxing...';
+              }
+            },
+            abortSignal: abortCtrl.signal,
+          });
+
+          triggerSave(blob, selected.filename);
+        } else if (selected.type === 'audio') {
+          const audioUrl = proxyStreamUrl(selected.audioStream.url);
+          const audioBlob = await fetchStreamBlob(audioUrl, selected.approxBytes, (rec, tot) => {
+            const pct = tot > 0 ? Math.min(100, Math.round((rec / tot) * 100)) : 0;
+            progressLabel.textContent = 'Downloading audio track...';
+            progressBar.style.width = `${pct}%`;
+            progressPercent.textContent = `${pct}%`;
+            progressBytes.textContent = tot > 0 ? `${formatBytes(rec)} / ${formatBytes(tot)}` : formatBytes(rec);
+            const elapsed = (Date.now() - startTime) / 1000;
+            if (elapsed > 0.5) progressSpeed.textContent = `${formatBytes(rec / elapsed)}/s`;
+          }, abortCtrl.signal);
+
+          progressLabel.textContent = `Converting to ${selected.format.toUpperCase()} in browser...`;
+          const blob = await muxBlobs(null, audioBlob, selected.format, (p) => {
+            progressBar.style.width = `${Math.round(p * 100)}%`;
+            progressPercent.textContent = `${Math.round(p * 100)}%`;
+          });
+          triggerSave(blob, selected.filename);
+        }
+
+        progressBar.style.width = '100%';
+        progressBar.style.background = '#00d400';
+        progressLabel.textContent = 'Complete!';
+        progressPercent.textContent = '100%';
+        progressSpeed.textContent = '';
+        cancelBtn.style.display = 'none';
+        doneBtn.style.display = 'inline-block';
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+        progressBox.style.display = 'none';
+        selectEl.disabled = formatEl.disabled = false;
+        startBtn.style.display = 'inline-flex';
+        if (selected.type === 'direct') directBtn.style.display = 'inline-flex';
+        cancelBtn.style.display = 'none';
+        statusMsg.textContent = `Download error: ${err.message}`;
+        statusMsg.style.color = '#e50914';
+        statusMsg.style.display = 'block';
+      }
+    });
+  });
 }

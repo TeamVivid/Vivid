@@ -18,13 +18,31 @@
 
 import { forceYtDlp, isYtDlpAvailable, getYtDlpInfo } from './ytdlp.js';
 import { hasOAuthFile } from './androidVrAuth.js';
+import { MWEB, WEB, TVHTML5, TVHTML5_SIMPLY } from './constants.js';
+import { mintCynTokens, getPlayerCode, decipherStream } from './absolutesolver/index.js';
+import { parseStoryboards } from './storyboards.js';
+import { cacheCaptionTracks } from './captions.js';
 
-// This file will first try to extract with Innertube, if it fails it will try to use yt-dlp and if that also fails it will try to use ANDROID_REEL (currently only returns progressive streams (like the ANDROID client, but i will still use it because i can))
+function isForceSabr() {
+  const v = process.env.FORCE_SABR || process.env['FORCE-SABR'];
+  return v === 'true' || v === '1' || v === 'yes';
+}
+
+function isDisableSabr() {
+  const v = process.env.DISABLE_SABR || process.env['DISABLE-SABR'];
+  return v === 'true' || v === '1' || v === 'yes';
+}
+
+function getSpecialClientRetry() {
+  const v = process.env.SPECIAL_CLIENT_RETRY || process.env['SPECIAL-CLIENT-RETRY'];
+  const parsed = parseInt(v, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 1;
+}
 
 function pickBestAudio(audioStreams) {
   return audioStreams.find(s => s.isDefault)
-  || audioStreams.find(s => s.isOriginal)
-  || audioStreams[0] || null;
+    || audioStreams.find(s => s.isOriginal)
+    || audioStreams[0] || null;
 }
 
 function buildEmptyResult(videoId) {
@@ -43,6 +61,7 @@ function buildEmptyResult(videoId) {
     usedClient: '',
     isUpcoming: false,
     scheduledStartTime: 0,
+    storyboards: null,
   };
 }
 
@@ -91,8 +110,8 @@ async function getStreamUrlsViaYtdlp(videoId) {
     if (!hasAudio && !hasVideo) continue;
 
     const mimeType = format.ext === 'm4a' || (hasAudio && !hasVideo)
-    ? `audio/${format.audio_ext === 'm4a' || format.ext === 'm4a' ? 'mp4' : format.ext}; codecs="${format.acodec}"`
-    : `video/${format.ext}; codecs="${[format.vcodec, format.acodec].filter(c => c && c !== 'none').join(', ')}"`;
+      ? `audio/${format.audio_ext === 'm4a' || format.ext === 'm4a' ? 'mp4' : format.ext}; codecs="${format.acodec}"`
+      : `video/${format.ext}; codecs="${[format.vcodec, format.acodec].filter(c => c && c !== 'none').join(', ')}"`;
 
     const streamInfo = {
       url: format.url,
@@ -130,14 +149,14 @@ async function getStreamUrlsViaYtdlp(videoId) {
   result.videoStreams.sort((a, b) => (b.height || 0) - (a.height || 0));
   result.bestAudio = pickBestAudio(result.audioStreams);
   result.bestVideo = result.videoStreams.find(s => s.mimeType.includes('avc1'))
-  || result.videoStreams[0] || null;
+    || result.videoStreams[0] || null;
 
   result.qualityMap = {};
   const resolutions = [144, 240, 360, 480, 720, 1080, 1440, 2160];
   for (const stream of result.videoStreams) {
     if (stream.mimeType.includes('avc1')) {
       const closest = resolutions.reduce((prev, curr) =>
-      Math.abs(curr - stream.height) < Math.abs(prev - stream.height) ? curr : prev
+        Math.abs(curr - stream.height) < Math.abs(prev - stream.height) ? curr : prev
       );
       if (!result.qualityMap[closest] || stream.bitrate > result.qualityMap[closest].bitrate) {
         result.qualityMap[closest] = stream;
@@ -158,10 +177,10 @@ function isUsableStreamingData(data) {
   const sd = data?.streamingData;
   if (!sd) return false;
   const hasFormats = (sd.formats && sd.formats.length) || (sd.adaptiveFormats && sd.adaptiveFormats.length);
-  return !!(hasFormats || sd.hlsManifestUrl);
+  return !!(hasFormats || sd.hlsManifestUrl || sd.serverAbrStreamingUrl);
 }
 
-function parseInnertubeResult(data, videoId, usedClient) {
+function parseInnertubeResult(data, videoId, usedClient, decipherFn = null, poToken = '') {
   const result = buildEmptyResult(videoId);
   result.usedClient = usedClient;
 
@@ -169,6 +188,11 @@ function parseInnertubeResult(data, videoId, usedClient) {
   result.playabilityStatus = data?.playabilityStatus?.status || '';
   result.playabilityReason = data?.playabilityStatus?.reason || '';
   result.isPlayable = result.playabilityStatus === 'OK';
+  result.storyboards = parseStoryboards(data?.storyboards || data?.playerResponse?.storyboards);
+
+  if (data?.captions?.playerCaptionsTracklistRenderer) {
+    try { cacheCaptionTracks(videoId, data.captions.playerCaptionsTracklistRenderer); } catch {}
+  }
 
   if (!result.isPlayable) {
     result.error = `Video not playable: ${result.playabilityReason || result.playabilityStatus}`;
@@ -187,8 +211,19 @@ function parseInnertubeResult(data, videoId, usedClient) {
   ];
 
   for (const format of allFormats) {
-    const url = format.url ? decodeURIComponent(format.url) : '';
+    let url = '';
+    if (decipherFn) {
+      try {
+        url = decipherFn(format);
+      } catch {}
+    }
+    if (!url && format.url) {
+      url = decodeURIComponent(format.url);
+    }
     if (!url) continue;
+    if (poToken && !url.includes('pot=')) {
+      url += (url.includes('?') ? '&' : '?') + `pot=${encodeURIComponent(poToken)}`;
+    }
     if (format.isDrc || /[?&]xtags=[^&]*drc/i.test(url)) continue;
 
     const mimeType = format.mimeType || '';
@@ -229,10 +264,12 @@ function parseInnertubeResult(data, videoId, usedClient) {
         const track = format.audioTrack;
         streamInfo.audioTrackId = track.id || track.audioTrackId || '';
         streamInfo.displayName = track.displayName || '';
-        if (track.audioIsDefault === true) streamInfo.isDefault = true;
+        if (track.audioIsDefault === true || format.isDefaultAudioTrack === true) streamInfo.isDefault = true;
         if (/original/i.test(streamInfo.displayName) || /original/i.test(streamInfo.audioTrackId)) {
           streamInfo.isOriginal = true;
         }
+      } else if (format.isDefaultAudioTrack === true) {
+        streamInfo.isDefault = true;
       }
       result.audioStreams.push(streamInfo);
     } else if (mimeType.startsWith('video/')) {
@@ -256,19 +293,30 @@ function parseInnertubeResult(data, videoId, usedClient) {
     result.dashManifestUrl = streamingData.dashManifestUrl;
   }
 
-  result.audioStreams.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+  if ((data?.videoDetails?.isLive || result.isLivestream) && !result.hlsManifestUrl) {
+    result.videoStreams = [];
+    result.audioStreams = [];
+    result.combinedStreams = [];
+  }
+
+  result.audioStreams.sort((a, b) => {
+    const aScore = (a.isDefault ? 2 : (a.isOriginal ? 1 : 0));
+    const bScore = (b.isDefault ? 2 : (b.isOriginal ? 1 : 0));
+    if (aScore !== bScore) return bScore - aScore;
+    return (b.bitrate || 0) - (a.bitrate || 0);
+  });
   result.videoStreams.sort((a, b) => (b.height || 0) - (a.height || 0));
   result.bestAudio = pickBestAudio(result.audioStreams);
 
   result.bestVideo = result.videoStreams.find(s => s.mimeType.includes('avc1'))
-  || result.videoStreams[0] || null;
+    || result.videoStreams[0] || null;
 
   result.qualityMap = {};
   const resolutions = [144, 240, 360, 480, 720, 1080, 1440, 2160];
   for (const stream of result.videoStreams) {
     if (stream.mimeType.includes('avc1')) {
       const closest = resolutions.reduce((prev, curr) =>
-      Math.abs(curr - stream.height) < Math.abs(prev - stream.height) ? curr : prev
+        Math.abs(curr - stream.height) < Math.abs(prev - stream.height) ? curr : prev
       );
       if (!result.qualityMap[closest] || stream.bitrate > result.qualityMap[closest].bitrate) {
         result.qualityMap[closest] = stream;
@@ -279,24 +327,46 @@ function parseInnertubeResult(data, videoId, usedClient) {
   return result;
 }
 
-function parseSabrResult(raw, videoId, client) {
+function parseSabrResult(raw, videoId, client, poToken = '', decipherFn = null, clientConfig = null) {
   const result = buildEmptyResult(videoId);
   result.usedClient = 'SABR';
   result.playabilityStatus = raw?.playabilityStatus?.status || 'OK';
   result.playabilityReason = raw?.playabilityStatus?.reason || '';
   result.isPlayable = result.playabilityStatus === 'OK';
+  result.storyboards = parseStoryboards(raw?.storyboards || raw?.playerResponse?.storyboards);
+
+  if (raw?.captions?.playerCaptionsTracklistRenderer) {
+    try { cacheCaptionTracks(videoId, raw.captions.playerCaptionsTracklistRenderer); } catch {}
+  }
 
   const sd = raw?.streamingData;
   if (!sd || !sd.serverAbrStreamingUrl) return null;
 
+  let sabrUrl = sd.serverAbrStreamingUrl;
+  if (decipherFn) {
+    try {
+      sabrUrl = decipherFn({ url: sabrUrl }, false);
+    } catch {}
+  }
+
   const ustreamerConfig = raw?.playerConfig?.mediaCommonConfig?.mediaUstreamerRequestConfig?.videoPlaybackUstreamerConfig || '';
+
+  const cName = clientConfig?.clientName || client?.clientName || (typeof client === 'string' ? client : 'ANDROID_VR');
+  const cVer = clientConfig?.clientVersion || client?.clientVersion || '1.73.21';
+  const cUa = clientConfig?.userAgent || client?.userAgent || '';
 
   result.sabr = {
     available: true,
-    sabrUrl: sd.serverAbrStreamingUrl,
+    videoId,
+    sabrUrl,
     proxyUrl: '/api/v1/proxy/sabr',
     visitorData: client.visitorData || raw?.responseContext?.visitorData || '',
     ustreamerConfig,
+    poToken,
+    clientName: cName,
+    clientVersion: cVer,
+    userAgent: cUa,
+    cpn: raw?.cpn || result.cpn || '',
     formats: [],
   };
 
@@ -336,8 +406,8 @@ function parseSabrResult(raw, videoId, client) {
       streamInfo.audioChannels = fmt.audioChannels || 2;
       streamInfo.audioTrackId = fmt.audioTrack?.id || '';
       streamInfo.displayName = fmt.audioTrack?.displayName || '';
-      if (fmt.audioTrack?.audioIsDefault) streamInfo.isDefault = true;
-      if (/original/i.test(streamInfo.displayName)) streamInfo.isOriginal = true;
+      if (fmt.isDefaultAudioTrack || fmt.audioTrack?.audioIsDefault) streamInfo.isDefault = true;
+      if (/original/i.test(streamInfo.displayName) || /original/i.test(streamInfo.audioTrackId)) streamInfo.isOriginal = true;
       result.audioStreams.push(streamInfo);
     } else if (mimeType.startsWith('video/')) {
       result.videoStreams.push(streamInfo);
@@ -345,7 +415,12 @@ function parseSabrResult(raw, videoId, client) {
     result.sabr.formats.push(streamInfo);
   }
 
-  result.audioStreams.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+  result.audioStreams.sort((a, b) => {
+    const aScore = (a.isDefault ? 2 : (a.isOriginal ? 1 : 0));
+    const bScore = (b.isDefault ? 2 : (b.isOriginal ? 1 : 0));
+    if (aScore !== bScore) return bScore - aScore;
+    return (b.bitrate || 0) - (a.bitrate || 0);
+  });
   result.videoStreams.sort((a, b) => (b.height || 0) - (a.height || 0));
   result.bestAudio = pickBestAudio(result.audioStreams);
   result.bestVideo = result.videoStreams[0] || null;
@@ -364,21 +439,85 @@ function parseSabrResult(raw, videoId, client) {
   return result;
 }
 
+export async function extractJsClient(client, videoId, clientKey, trySabr) {
+  if (client?.initPromise) {
+    try { await client.initPromise; } catch {}
+  }
+  let targetKey = clientKey;
+  if (!trySabr && (targetKey === 'tv' || targetKey === 'tvhtml5')) {
+    targetKey = 'tv_simply';
+  }
+  const isTv = targetKey === 'tv' || targetKey === 'tvhtml5';
+  const isTvSimply = targetKey === 'tv_simply' || targetKey === 'tvhtml5_simply';
+  const clientConfig = targetKey === 'mweb' ? MWEB : (targetKey === 'web' ? WEB : (isTvSimply ? TVHTML5_SIMPLY : TVHTML5));
+  const userAgent = clientConfig.userAgent;
+  const player = await getPlayerCode(isTvSimply ? 'tv_simply' : (isTv ? 'tv' : targetKey), userAgent);
+
+  if (!client.visitorData) {
+    if (isTv || isTvSimply) {
+      await client.fetchTvVisitorData?.();
+    } else {
+      await client.fetchVisitorData?.();
+    }
+  }
+
+  let cyn = null;
+  try {
+    cyn = await mintCynTokens(videoId, client.visitorData || '', {
+      clientKey: isTvSimply ? 'tv_simply' : (isTv ? 'tv' : targetKey),
+      clientVersion: clientConfig.clientVersion,
+      userAgent
+    });
+  } catch {}
+
+  const playerPoToken = cyn?.playerCynToken || cyn?.cynToken || '';
+  const sabrPoToken = cyn?.sabrCynToken || playerPoToken;
+
+  let raw;
+  if (targetKey === 'mweb') {
+    raw = await client.mwebPlayer(videoId, { sts: player.sts, poToken: playerPoToken });
+  } else if (targetKey === 'web') {
+    raw = await client.webPlayer(videoId, { sts: player.sts, poToken: playerPoToken });
+  } else if (isTvSimply) {
+    raw = await client.tvSimplyPlayer(videoId, { sts: player.sts, poToken: playerPoToken });
+  } else {
+    raw = await client.tvPlayer(videoId, { sts: player.sts, poToken: playerPoToken });
+  }
+
+  const upcoming = parseUpcoming(raw, videoId, clientConfig.clientName);
+  if (upcoming) return upcoming;
+
+  const streamPoToken = sabrPoToken || playerPoToken;
+  const decipherFn = (fmt, addPot = true) => decipherStream(targetKey, player.code, fmt, streamPoToken, targetKey, addPot);
+
+  if (trySabr && !isTvSimply && raw?.streamingData?.serverAbrStreamingUrl && !raw?.videoDetails?.isLive) {
+    const sabrResult = parseSabrResult(raw, videoId, client, sabrPoToken, decipherFn, clientConfig);
+    if (sabrResult && sabrResult.isPlayable && (sabrResult.videoStreams.length || sabrResult.audioStreams.length)) {
+      return sabrResult;
+    }
+  }
+
+  if (isUsableStreamingData(raw)) {
+    const res = parseInnertubeResult(raw, videoId, clientConfig.clientName, decipherFn, streamPoToken);
+    if (res.videoStreams.length || res.audioStreams.length || res.combinedStreams.length || res.hlsManifestUrl) {
+      return res;
+    }
+  }
+
+  return null;
+}
+
 export async function getStreamUrls(client, videoId, options = {}) {
   let lastError = '';
 
-  const trySabr = options?.include_and_try_sabr === true || options?.include_and_try_sabr === 'true';
-  if (trySabr && hasOAuthFile()) {
-    try {
-      const raw = await client.androidVrPlayer(videoId);
-      const sabrResult = raw?.videoDetails?.isLive ? null : parseSabrResult(raw, videoId, client);
-      if (sabrResult && sabrResult.isPlayable && (sabrResult.videoStreams.length || sabrResult.audioStreams.length)) {
-        return sabrResult;
-      }
-    } catch (e) {
-      lastError = `SABR failed: ${e.message}`;
-    }
-  }
+  const reqClient = (options?.client || '').toLowerCase();
+  const isTvSimplyRequested = reqClient === 'tv_simply' || reqClient === 'tvhtml5_simply';
+  const isTvRequested = reqClient === 'tv' || reqClient === 'tvhtml5';
+  const isMwebRequested = reqClient === 'mweb';
+  const isWebRequested = reqClient === 'web';
+  const isAndroidVrRequested = reqClient === 'android_vr' || reqClient === 'androidvr';
+  const isVisionOsRequested = reqClient === 'visionos';
+  const trySabr = !isTvSimplyRequested && (options?.include_and_try_sabr === true || options?.include_and_try_sabr === 'true' || isForceSabr()) && !isDisableSabr();
 
   if (forceYtDlp()) {
     try {
@@ -390,46 +529,204 @@ export async function getStreamUrls(client, videoId, options = {}) {
     }
   }
 
-  for (const attempt of [
-    { key: 'VISIONOS_1_03', fetch: () => client.visionOsPlayer(videoId) },
-  ]) {
+  if (isTvSimplyRequested) {
     try {
-      const raw = await attempt.fetch();
-      const upcoming = parseUpcoming(raw, videoId, attempt.key);
+      const tvRes = await extractJsClient(client, videoId, 'tv_simply', false);
+      if (tvRes) return tvRes;
+    } catch (e) {
+      lastError = `TVHTML5_SIMPLY failed: ${e.message}`;
+    }
+  }
+
+  if (isTvRequested) {
+    try {
+      const tvRes = await extractJsClient(client, videoId, trySabr ? 'tv' : 'tv_simply', trySabr);
+      if (tvRes) return tvRes;
+    } catch (e) {
+      lastError = `${trySabr ? 'TVHTML5' : 'TVHTML5_SIMPLY'} failed: ${e.message}`;
+    }
+  }
+
+  if (isAndroidVrRequested && hasOAuthFile()) {
+    try {
+      const raw = await client.androidVrPlayer(videoId);
+      const sabrResult = raw?.videoDetails?.isLive ? null : parseSabrResult(raw, videoId, client);
+      if (sabrResult && sabrResult.isPlayable && (sabrResult.videoStreams.length || sabrResult.audioStreams.length)) {
+        return sabrResult;
+      }
+    } catch (e) {
+      lastError = `ANDROID_VR_SABR failed: ${e.message}`;
+    }
+  }
+
+  if (isVisionOsRequested) {
+    try {
+      const raw = await client.visionOsPlayer(videoId);
+      const upcoming = parseUpcoming(raw, videoId, 'VISIONOS');
       if (upcoming) return upcoming;
       if (isUsableStreamingData(raw)) {
-        return parseInnertubeResult(raw, videoId, attempt.key);
+        const res = parseInnertubeResult(raw, videoId, 'VISIONOS');
+        if (res.videoStreams.length || res.audioStreams.length || res.combinedStreams.length || res.hlsManifestUrl) {
+          return res;
+        }
       }
-      lastError = raw?.playabilityStatus?.reason || raw?.playabilityStatus?.status || 'no usable streaming data';
     } catch (e) {
-      lastError = e.message;
+      lastError = `VISIONOS failed: ${e.message}`;
     }
   }
 
-  if (await isYtDlpAvailable()) {
+  if (trySabr) {
+    if (isMwebRequested) {
+      try {
+        const mwebRes = await extractJsClient(client, videoId, 'mweb', true);
+        if (mwebRes) return mwebRes;
+      } catch (e) {
+        lastError = `MWEB client failed: ${e.message}`;
+      }
+    }
+
     try {
-      return await getStreamUrlsViaYtdlp(videoId);
+      const webRes = await extractJsClient(client, videoId, 'web', true);
+      if (webRes) return webRes;
     } catch (e) {
-      lastError = e.message;
+      lastError = `WEB client failed: ${e.message}`;
+    }
+
+    try {
+      const mwebRes = await extractJsClient(client, videoId, 'mweb', true);
+      if (mwebRes) return mwebRes;
+    } catch (e) {
+      lastError = `MWEB client failed: ${e.message}`;
+    }
+
+    try {
+      const raw = await client.visionOsPlayer(videoId);
+      const upcoming = parseUpcoming(raw, videoId, 'VISIONOS');
+      if (upcoming) return upcoming;
+      if (isUsableStreamingData(raw)) {
+        const res = parseInnertubeResult(raw, videoId, 'VISIONOS');
+        if (res.videoStreams.length || res.audioStreams.length || res.combinedStreams.length || res.hlsManifestUrl) {
+          return res;
+        }
+      }
+    } catch (e) {
+      lastError = `VISIONOS failed: ${e.message}`;
+    }
+
+    if (hasOAuthFile()) {
+      try {
+        const raw = await client.androidVrPlayer(videoId);
+        const sabrResult = raw?.videoDetails?.isLive ? null : parseSabrResult(raw, videoId, client);
+        if (sabrResult && sabrResult.isPlayable && (sabrResult.videoStreams.length || sabrResult.audioStreams.length)) {
+          return sabrResult;
+        }
+      } catch (e) {
+        lastError = `ANDROID_VR_SABR failed: ${e.message}`;
+      }
+    }
+
+    try {
+      const tvRes = await extractJsClient(client, videoId, 'tv_simply', false);
+      if (tvRes) return tvRes;
+    } catch (e) {
+      lastError = `TVHTML5_SIMPLY failed: ${e.message}`;
+    }
+
+    if (await isYtDlpAvailable()) {
+      try {
+        return await getStreamUrlsViaYtdlp(videoId);
+      } catch (e) {
+        lastError = `yt-dlp failed: ${e.message}`;
+      }
+    }
+
+    try {
+      const raw = await client.reelPlayer(videoId);
+      if (isUsableStreamingData(raw)) {
+        return parseInnertubeResult(raw, videoId, 'ANDROID_REEL');
+      }
+    } catch (e) {
+      lastError = `ANDROID_REEL failed: ${e.message}`;
     }
   } else {
-    lastError = 'yt-dlp is not installed';
-  }
-
-  try {
-    const raw = await client.reelPlayer(videoId);
-    if (isUsableStreamingData(raw)) {
-      return parseInnertubeResult(raw, videoId, 'ANDROID_REEL');
+    if (isWebRequested) {
+      try {
+        const webRes = await extractJsClient(client, videoId, 'web', false);
+        if (webRes && !webRes.sabr?.available) {
+          return webRes;
+        }
+      } catch (e) {
+        lastError = `WEB client failed: ${e.message}`;
+      }
     }
-    lastError = raw?.playabilityStatus?.reason || raw?.playabilityStatus?.status || 'no usable streaming data';
-  } catch (e) {
-    lastError = e.message;
+
+    try {
+      const tvRes = await extractJsClient(client, videoId, 'tv_simply', false);
+      if (tvRes) return tvRes;
+    } catch (e) {
+      lastError = `TVHTML5_SIMPLY failed: ${e.message}`;
+    }
+
+    const specialRetries = getSpecialClientRetry();
+    for (let i = 0; i <= specialRetries; i++) {
+      try {
+        const mwebRes = await extractJsClient(client, videoId, 'mweb', false);
+        if (mwebRes && !mwebRes.sabr?.available) {
+          return mwebRes;
+        }
+      } catch (e) {
+        lastError = `MWEB attempt ${i + 1} failed: ${e.message}`;
+      }
+    }
+
+    try {
+      const raw = await client.visionOsPlayer(videoId);
+      const upcoming = parseUpcoming(raw, videoId, 'VISIONOS');
+      if (upcoming) return upcoming;
+      if (isUsableStreamingData(raw)) {
+        const res = parseInnertubeResult(raw, videoId, 'VISIONOS');
+        if (res.videoStreams.length || res.audioStreams.length || res.combinedStreams.length || res.hlsManifestUrl) {
+          return res;
+        }
+      }
+    } catch (e) {
+      lastError = `VISIONOS failed: ${e.message}`;
+    }
+
+    if (hasOAuthFile()) {
+      try {
+        const raw = await client.androidVrPlayer(videoId);
+        const sabrResult = raw?.videoDetails?.isLive ? null : parseSabrResult(raw, videoId, client);
+        if (sabrResult && sabrResult.isPlayable && (sabrResult.videoStreams.length || sabrResult.audioStreams.length)) {
+          return sabrResult;
+        }
+      } catch (e) {
+        lastError = `ANDROID_VR_SABR failed: ${e.message}`;
+      }
+    }
+
+    if (await isYtDlpAvailable()) {
+      try {
+        return await getStreamUrlsViaYtdlp(videoId);
+      } catch (e) {
+        lastError = `yt-dlp failed: ${e.message}`;
+      }
+    }
+
+    try {
+      const raw = await client.reelPlayer(videoId);
+      if (isUsableStreamingData(raw)) {
+        return parseInnertubeResult(raw, videoId, 'ANDROID_REEL');
+      }
+    } catch (e) {
+      lastError = `ANDROID_REEL failed: ${e.message}`;
+    }
   }
 
   const result = buildEmptyResult(videoId);
-  result.error = `All extraction methods (VISIONOS, yt-dlp, ANDROID_REEL) failed` +
-  (lastError ? ` (last error: ${lastError})` : '') +
-  `. Check whether your server's IP has been blocked by YouTube, or make sure Vivid is up to date: https://github.com/Youtube-Hackers/vivid`;
+  result.error = `All extraction methods failed` +
+    (lastError ? ` (last error: ${lastError})` : '') +
+    `. Check whether your server's IP has been blocked by YouTube, or make sure Vivid is up to date: https://github.com/Youtube-Hackers/vivid`;
   return result;
 }
 

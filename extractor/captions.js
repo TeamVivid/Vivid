@@ -21,6 +21,35 @@ import fetch from 'node-fetch';
 import { getProxyAgent } from './proxyManager.js';
 import { forceYtDlp, isYtDlpAvailable, getYtDlpInfo } from './ytdlp.js';
 
+const captionTracksCache = new Map();
+const vttCache = new Map();
+
+export function cacheCaptionTracks(videoId, captionsRenderer) {
+  if (!videoId || !captionsRenderer) return;
+  const result = { baseLanguages: [], translationLanguages: [], error: '', cachedAt: Date.now() };
+  for (const track of captionsRenderer.captionTracks || []) {
+    result.baseLanguages.push({
+      name: getTextFromObject(track.name) || '',
+      languageCode: track.languageCode || '',
+      baseUrl: track.baseUrl || '',
+      isTranslatable: track.isTranslatable || false,
+    });
+  }
+  for (const lang of captionsRenderer.translationLanguages || []) {
+    result.translationLanguages.push({
+      name: getTextFromObject(lang.languageName) || '',
+      languageCode: lang.languageCode || '',
+    });
+  }
+  if (result.baseLanguages.length > 0) {
+    captionTracksCache.set(videoId, result);
+    if (captionTracksCache.size > 500) {
+      const oldest = captionTracksCache.keys().next().value;
+      captionTracksCache.delete(oldest);
+    }
+  }
+}
+
 async function getCaptionTracksViaInnertube(client, videoId) {
   const result = { baseLanguages: [], translationLanguages: [], error: '' };
   try {
@@ -83,22 +112,56 @@ async function getCaptionTracksViaYtdlp(videoId) {
 }
 
 export async function getCaptionTracks(client, videoId) {
+  const cached = captionTracksCache.get(videoId);
+  if (cached && (Date.now() - (cached.cachedAt || 0) < 3600 * 1000)) {
+    return cached;
+  }
+
   if (forceYtDlp()) {
     try {
-      return await getCaptionTracksViaYtdlp(videoId);
+      const res = await getCaptionTracksViaYtdlp(videoId);
+      if (res.baseLanguages.length) {
+        res.cachedAt = Date.now();
+        captionTracksCache.set(videoId, res);
+      }
+      return res;
     } catch (e) {
       return { baseLanguages: [], translationLanguages: [], error: `yt-dlp failed (FORCE-YT-DLP is enabled): ${e.message}` };
     }
   }
 
   const result = await getCaptionTracksViaInnertube(client, videoId);
-  if (result.baseLanguages.length || !(await isYtDlpAvailable())) return result;
+  if (result.baseLanguages.length || !(await isYtDlpAvailable())) {
+    if (result.baseLanguages.length) {
+      result.cachedAt = Date.now();
+      captionTracksCache.set(videoId, result);
+    }
+    return result;
+  }
 
   try {
-    return await getCaptionTracksViaYtdlp(videoId);
+    const ytdlpRes = await getCaptionTracksViaYtdlp(videoId);
+    if (ytdlpRes.baseLanguages.length) {
+      ytdlpRes.cachedAt = Date.now();
+      captionTracksCache.set(videoId, ytdlpRes);
+      return ytdlpRes;
+    }
+    return result;
   } catch {
     return result;
   }
+}
+
+function decodeXmlEntities(str) {
+  if (!str) return '';
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/&#([0-9]+);/g, (_, d) => String.fromCharCode(parseInt(d, 10)));
 }
 
 export async function getCaptionContent(baseUrl, translationLang = '') {
@@ -118,18 +181,85 @@ export async function getCaptionContent(baseUrl, translationLang = '') {
     if (agent) fetchArgs.agent = agent;
     const res = await fetch(url, fetchArgs);
     if (!res.ok) throw new Error(`Failed to fetch captions: ${res.status}`);
-    const data = await res.json();
+    
+    const rawText = await res.text();
     const captions = [];
-    for (const event of data.events || []) {
-      if (!event.segs) continue;
-      captions.push({
-        startTime: (event.tStartMs || 0) / 1000,
-        endTime: ((event.tStartMs || 0) + (event.dDurationMs || 0)) / 1000,
-        content: (event.segs || []).map(s => s.utf8 || '').join(''),
-      });
+
+    try {
+      const data = JSON.parse(rawText);
+      for (const event of data.events || []) {
+        if (!event.segs) continue;
+        const text = (event.segs || []).map(s => s.utf8 || '').join('');
+        if (!text.trim()) continue;
+        captions.push({
+          startTime: (event.tStartMs || 0) / 1000,
+          endTime: ((event.tStartMs || 0) + (event.dDurationMs || 0)) / 1000,
+          content: text.replace(/\n+/g, ' ').trim(),
+        });
+      }
+      return { captions, error: '' };
+    } catch {}
+
+    const xmlRegex = /<(?:text|p)\b[^>]*?(?:start="([^"]+)"|t="([^"]+)")(?:[^>]*?(?:dur="([^"]+)"|d="([^"]+)"))?[^>]*>([\s\S]*?)<\/(?:text|p)>/gi;
+    let match;
+    while ((match = xmlRegex.exec(rawText)) !== null) {
+      const startSec = match[1] ? parseFloat(match[1]) : (match[2] ? parseInt(match[2], 10) / 1000 : 0);
+      const durSec = match[3] ? parseFloat(match[3]) : (match[4] ? parseInt(match[4], 10) / 1000 : 0);
+      const text = decodeXmlEntities(match[5].replace(/<[^>]+>/g, '').trim());
+      if (text) {
+        captions.push({
+          startTime: startSec,
+          endTime: startSec + durSec,
+          content: text,
+        });
+      }
     }
-    return { captions, error: '' };
-  } catch (e) { return { captions: [], error: e.message }; }
+
+    return { captions, error: captions.length ? '' : 'No caption segments parsed' };
+  } catch (e) {
+    return { captions: [], error: e.message };
+  }
 }
 
-export default { getCaptionTracks, getCaptionContent };
+export function fmtVttTime(seconds) {
+  const totalMs = Math.max(0, Math.round(seconds * 1000));
+  const hh = String(Math.floor(totalMs / 3600000)).padStart(2, '0');
+  const mm = String(Math.floor((totalMs % 3600000) / 60000)).padStart(2, '0');
+  const ss = String(Math.floor((totalMs % 60000) / 1000)).padStart(2, '0');
+  const ms = String(totalMs % 1000).padStart(3, '0');
+  return `${hh}:${mm}:${ss}.${ms}`;
+}
+
+export async function getCaptionVtt(baseUrl, translationLang = '') {
+  const cacheKey = `${baseUrl}|${translationLang || ''}`;
+  const cached = vttCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiresAt) {
+    return cached.vtt;
+  }
+
+  const { captions, error } = await getCaptionContent(baseUrl, translationLang);
+  if (error && (!captions || !captions.length)) {
+    throw new Error(error || 'Failed to fetch captions');
+  }
+
+  let vtt = 'WEBVTT\n\n';
+  for (const cap of captions) {
+    vtt += `${fmtVttTime(cap.startTime)} --> ${fmtVttTime(cap.endTime)}\n${cap.content}\n\n`;
+  }
+
+  vttCache.set(cacheKey, { vtt, expiresAt: Date.now() + 7200 * 1000 });
+  if (vttCache.size > 1000) {
+    const oldest = vttCache.keys().next().value;
+    vttCache.delete(oldest);
+  }
+
+  return vtt;
+}
+
+export default {
+  getCaptionTracks,
+  getCaptionContent,
+  getCaptionVtt,
+  cacheCaptionTracks,
+  fmtVttTime
+};

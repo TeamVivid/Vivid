@@ -69,6 +69,45 @@ router.get('/:id/community', async (req, res) => {
   }
 });
 
+router.get('/post/:postId/comments', async (req, res) => {
+  try {
+    const result = await req.extractor.loadPostComments(req.params.postId, req.query.channel, req.query.continuation || null);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/:id/about', async (req, res) => {
+  try {
+    res.json(await req.extractor.getChannelAbout(req.params.id));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/:id/search', async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q) return res.status(400).json({ error: 'Missing query parameter "q"' });
+    res.json(await req.extractor.searchChannel(req.params.id, q));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+for (const tab of ['home', 'releases']) {
+  router.get(`/:id/${tab}`, async (req, res) => {
+    try {
+      const channel = await req.extractor.getChannel(req.params.id);
+      const params = tab === 'home' ? null : channel.releasesTabParams;
+      res.json(await req.extractor.loadChannelSections(channel.id || req.params.id, params));
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+}
+
 router.get('/:id/continuation', async (req, res) => {
   try {
     const { token } = req.query;

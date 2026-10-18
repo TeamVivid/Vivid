@@ -68,26 +68,70 @@ export function getTextFromObject(obj, preserveUrls = false) {
   return '';
 }
 
+export function hasVerifiedBadge(obj) {
+  return !!obj && /VERIFIED|CHECK_CIRCLE|OFFICIAL_ARTIST/.test(JSON.stringify(obj));
+}
+
+export function findKey(node, key) {
+  if (!node || typeof node !== 'object') return null;
+  if (node[key]) return node[key];
+  for (const value of Object.values(node)) {
+    const found = findKey(value, key);
+    if (found) return found;
+  }
+  return null;
+}
+
 export function normalizeThumbnailUrl(url) {
   if (!url) return '';
   if (url.startsWith('//')) return 'https:' + url;
   return url;
 }
 
-export function parseSuccinctVideo(renderer) {
+export function parseSuccinctVideo(renderer, fallbackAuthor = '') {
   if (!renderer) return null;
   const videoId = renderer.videoId || '';
   const thumbs = renderer.thumbnail?.thumbnails || [];
   const rawThumb = thumbs.length ? (thumbs[thumbs.length - 1].url || '') : (videoId ? getVideoThumbnailUrl(videoId) : '');
+  const byline = renderer.shortBylineText || renderer.longBylineText || renderer.ownerText || renderer.bylineText;
+  const author = getTextFromObject(byline) || fallbackAuthor || '';
+  const authorId = byline?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.browseId
+    || renderer.channelThumbnailSupportedRenderers?.channelThumbnailWithLinkRenderer?.navigationEndpoint?.browseEndpoint?.browseId
+    || renderer.channelThumbnail?.channelThumbnailWithLinkRenderer?.navigationEndpoint?.browseEndpoint?.browseId
+    || '';
+  const authorUrl = byline?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.canonicalBaseUrl
+    || (authorId ? `/channel/${authorId}` : '');
+  const duration = getTextFromObject(renderer.lengthText)
+    || getTextFromObject(renderer.thumbnailOverlays?.[0]?.thumbnailOverlayTimeStatusRenderer?.text)
+    || '';
+  let views = getTextFromObject(renderer.shortViewCountText)
+    || getTextFromObject(renderer.viewCountText)
+    || '';
+  if (!views) {
+    const m = renderer.accessibility?.accessibilityData?.label?.match(/([\d.,]+\s*(?:thousand|million|billion|K|M|B)?\s*views)/i)
+      || renderer.headline?.accessibility?.accessibilityData?.label?.match(/([\d.,]+\s*views)/i);
+    if (m) views = m[1];
+  }
+  let publishDate = getTextFromObject(renderer.publishedTimeText)
+    || (renderer.badges?.[0]?.metadataBadgeRenderer?.label || '')
+    || '';
+  if (!publishDate) {
+    const m = renderer.accessibility?.accessibilityData?.label?.match(/(\d+\s+(?:second|minute|hour|day|week|month|year)s?\s+ago)/i);
+    if (m) publishDate = m[1];
+  }
   return {
     type: 'video',
     videoId,
     url: videoId ? `/watch?v=${videoId}` : '',
     title: getTextFromObject(renderer.title) || getTextFromObject(renderer.headline) || '',
-    duration: getTextFromObject(renderer.lengthText) || '',
-    publishDate: getTextFromObject(renderer.publishedTimeText) || '',
-    views: getTextFromObject(renderer.shortViewCountText) || '',
-    author: getTextFromObject(renderer.shortBylineText) || '',
+    duration,
+    publishDate,
+    views,
+    author,
+    authorId,
+    authorUrl,
+    verified: hasVerifiedBadge([renderer.ownerBadges, renderer.badges, renderer.bylineBadges, byline])
+      || /BADGE_STYLE_TYPE_VERIFIED|CHECK_CIRCLE_THICK|OFFICIAL_ARTIST_BADGE/.test(JSON.stringify(renderer)),
     thumbnailUrl: normalizeThumbnailUrl(rawThumb),
   };
 }
@@ -104,6 +148,7 @@ export function parseSuccinctChannel(renderer) {
     subscribers: getTextFromObject(renderer.subscriberCountText) || '',
     videoCount: getTextFromObject(renderer.videoCountText) || '',
     iconUrl: normalizeThumbnailUrl(rawIcon),
+    verified: hasVerifiedBadge([renderer.ownerBadges, renderer.badges]),
   };
 }
 
@@ -111,12 +156,13 @@ export function parseSuccinctPlaylist(renderer) {
   if (!renderer) return null;
 
   let thumbnailUrl = '';
-  const thumbnails = renderer?.thumbnail?.thumbnails || renderer?.thumbnailRenderer?.playlistVideoThumbnailRenderer?.thumbnail?.thumbnails || [];
+  const thumbnails = renderer?.thumbnail?.thumbnails || renderer?.thumbnails?.[0]?.thumbnails || renderer?.thumbnailRenderer?.playlistVideoThumbnailRenderer?.thumbnail?.thumbnails || [];
   if (thumbnails.length) {
     thumbnailUrl = normalizeThumbnailUrl(thumbnails[thumbnails.length - 1].url || '');
   }
 
   let url = convertUrlToMobile(renderer?.shareUrl || '');
+  if (!url) url = renderer?.navigationEndpoint?.commandMetadata?.webCommandMetadata?.url || '';
   if (!url.startsWith('https://m.youtube.com/watch')) {
     if (url.startsWith('https://m.youtube.com/playlist?')) {
       const params = parseQueryParams(url.split('?')[1] || '');
@@ -127,12 +173,21 @@ export function parseSuccinctPlaylist(renderer) {
   }
 
   const relUrl = url.replace('https://m.youtube.com', '').replace('https://www.youtube.com', '');
+  const byline = renderer.shortBylineText || renderer.longBylineText;
+  const author = byline?.runs?.[0]?.text || getTextFromObject(byline) || '';
+  const authorId = byline?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.browseId || '';
+  const authorUrl = byline?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.canonicalBaseUrl
+    || (authorId ? `/channel/${authorId}` : '');
 
   return {
     type: 'playlist',
+    id: renderer.playlistId || getPlaylistIdByUrl(relUrl),
     url: relUrl,
     title: getTextFromObject(renderer.title) || '',
     videoCount: getTextFromObject(renderer.videoCountText) || '',
+    author,
+    authorId,
+    authorUrl,
     thumbnailUrl,
   };
 }
@@ -148,7 +203,7 @@ export function getPlaylistIdByUrl(url) {
 }
 
 export function getVideoThumbnailUrl(id) {
-  return `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
+  return `https://i.ytimg.com/vi/${id}/mqdefault.jpg`;
 }
 
 export function getVideoUrlById(id) {

@@ -16,10 +16,11 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-import { getChannel, getChannelContinuation, getChannelCommunity, getChannelPlaylists, proxyImageUrl, syncAccount } from '../api.js';
+import { getChannel, getChannelContinuation, getChannelCommunity, getChannelPlaylists, getChannelHome, getChannelReleases, getChannelAbout, searchChannel, getPostComments, proxyImageUrl, syncAccount } from '../api.js';
 import { escapeHtml } from '../router.js';
 import { getPlaylists } from '../playlistManager.js';
-import { videoCard } from './home.js';
+import { videoCard, verifiedBadge } from './home.js';
+import { renderComment, attachReplyListeners } from './watch.js';
 
 export async function renderChannel(app, params) {
   const channelId = params.id;
@@ -44,10 +45,9 @@ export async function renderChannel(app, params) {
       return part.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
     }).join('');
   }
-  let activeTab = 'videos';
-  let contToken = data.videosContinuationToken || '';
-
-  let sorts = data.videoSortTokens || {};
+  let activeTab = '';
+  let contToken = '';
+  let sorts = {};
   
   const subs = JSON.parse(localStorage.getItem('vivid_subs') || '[]');
   const isSubscribed = subs.includes(channelId);
@@ -60,7 +60,7 @@ export async function renderChannel(app, params) {
   <img src="${proxyImageUrl(data.iconUrl || '')}" alt="">
   </div>
   <div>
-  <div class="channel-name-lg">${escapeHtml(data.name || '')}</div>
+  <div class="channel-name-lg">${escapeHtml(data.name || '')}${verifiedBadge(data.verified)}</div>
   ${data.handle ? `<div class="channel-handle">${escapeHtml(data.handle)}</div>` : ''}
   ${data.subscriberCount ? `<div class="channel-sub-count">${escapeHtml(data.subscriberCount)}</div>` : ''}
   <button id="sub-btn" style="margin-top:8px; padding:6px 16px; background:#e50914; color:#fff; border:none; border-radius:16px; font-weight:bold; cursor:pointer;">
@@ -71,28 +71,28 @@ export async function renderChannel(app, params) {
   </div>
 
   ${data.description ? `
-    <div class="watch-description" id="channel-description" style="margin-bottom:1rem">
-    ${linkifyText(data.description)}
+    <div class="channel-description" id="channel-description">
+    <div class="channel-description-text">${escapeHtml(data.description)}</div>
+    <span class="channel-description-more">...more</span>
     </div>
     ` : ''}
 
     <div class="channel-tabs" id="channel-tabs">
-    <button class="channel-tab active" data-tab="videos">Videos</button>
+    <button class="channel-tab active" data-tab="home">Home</button>
+    <button class="channel-tab" data-tab="videos">Videos</button>
     <button class="channel-tab" data-tab="shorts">Shorts</button>
     <button class="channel-tab" data-tab="streams">Streams</button>
+    ${data.releasesTabParams ? '<button class="channel-tab" data-tab="releases">Releases</button>' : ''}
     <button class="channel-tab" data-tab="playlists">Playlists</button>
-    <button class="channel-tab" data-tab="community">Community</button>
+<button class="channel-tab" data-tab="community">Community</button>
+    <button class="channel-tab" data-tab="search">Search</button>
     </div>
 
-    <div id="channel-sorts" style="margin-bottom:1rem; display:flex; gap:10px;">
-    ${renderSortButtons(sorts)}
-    </div>
+    <div id="channel-sorts" style="margin-bottom:1rem; display:none; gap:8px;"></div>
 
-    <div class="video-grid" id="channel-content">
-    ${(data.videos || []).map(v => videoCard(v)).join('')}
-    </div>
+    <div class="video-grid" id="channel-content"></div>
     <div id="community-content" style="display:none;"></div>
-    ${contToken ? '<button class="load-more" id="load-more-channel">Load more</button>' : ''}
+    <button class="load-more" id="load-more-channel" style="display:none;">Load more</button>
     `;
   document.title = data.name ? `${data.name} - Vivid` : 'Channel - Vivid';
   
@@ -111,7 +111,7 @@ export async function renderChannel(app, params) {
         try {
           const more = await getChannelContinuation(channelId, btn.dataset.token);
           contToken = more.continuationToken || '';
-          content.innerHTML = (more.items || []).map(v => videoCard(v)).join('');
+          content.innerHTML = (more.items || []).map(renderItem).join('');
           if (contToken && loadMoreBtn) loadMoreBtn.style.display = 'block';
         } catch (e) {}
       });
@@ -122,8 +122,108 @@ export async function renderChannel(app, params) {
 
   const descBox = document.getElementById('channel-description');
   if (descBox) {
-    descBox.addEventListener('click', () => descBox.classList.toggle('expanded'));
+    descBox.addEventListener('click', async () => {
+      const modal = document.createElement('div');
+      modal.className = 'modal-backdrop';
+      modal.innerHTML = `
+        <div class="modal-box">
+          <div class="modal-header">
+            <h2 class="modal-title">About</h2>
+            <button class="modal-close-btn">&times;</button>
+          </div>
+          <div class="modal-body channel-about"><div class="loading"><div class="spinner"></div></div></div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+      modal.addEventListener('click', (e) => {
+        if (e.target === modal || e.target.closest('.modal-close-btn')) modal.remove();
+      });
+
+      const about = await getChannelAbout(channelId).catch(() => ({ error: true }));
+      const stats = about.error
+        ? [data.handle, data.subscriberCount]
+        : [about.handle, about.country, about.joined, about.subscribers, about.videos, about.views];
+      const links = (about.links || []).map(l => `
+        <a href="${escapeHtml(l.url)}" target="_blank" rel="noopener noreferrer" class="channel-about-link">
+          <span>${escapeHtml(l.title)}</span>
+          <span>${escapeHtml(l.label)}</span>
+        </a>
+      `).join('');
+      modal.querySelector('.channel-about').innerHTML = `
+        <div class="channel-about-description">${linkifyText(about.description || data.description || '')}</div>
+        ${links ? `<h3>Links</h3><div class="channel-about-links">${links}</div>` : ''}
+        <h3>More info</h3>
+        <ul class="channel-about-stats">${stats.filter(Boolean).map(t => `<li>${escapeHtml(t)}</li>`).join('')}</ul>
+      `;
+    });
   }
+
+  function renderSections(sections) {
+    return sections.map(sec => sec.items.length === 1 && sec.items[0].description ? `
+      <div class="channel-featured">
+        <a href="#${sec.items[0].url}" class="channel-featured-thumb"><img src="${proxyImageUrl(sec.items[0].thumbnailUrl)}" alt=""></a>
+        <div class="channel-featured-info">
+          <a href="#${sec.items[0].url}" class="channel-featured-title">${escapeHtml(sec.items[0].title)}</a>
+          <div class="channel-featured-meta">${[sec.items[0].views, sec.items[0].publishDate].filter(Boolean).map(escapeHtml).join(' • ')}</div>
+          <div class="channel-featured-desc">${escapeHtml(sec.items[0].description)}</div>
+        </div>
+      </div>
+    ` : `
+      <div class="channel-shelf">
+        ${sec.title ? `<h2 class="channel-shelf-title">${escapeHtml(sec.title)}</h2>` : ''}
+        <div class="channel-shelf-row">${sec.items.map(renderItem).join('')}</div>
+      </div>
+    `).join('');
+  }
+
+  content.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const q = e.target.querySelector('input').value.trim();
+    if (!q) return;
+    const results = document.getElementById('channel-search-results');
+    results.innerHTML = '<div class="loading" style="grid-column:1/-1;"><div class="spinner"></div></div>';
+    loadMoreBtn.style.display = 'none';
+    try {
+      const res = await searchChannel(channelId, q);
+      contToken = res.continuationToken || '';
+      results.innerHTML = (res.items || []).map(renderItem).join('')
+        || `<p style="color:var(--text-muted);grid-column:1/-1;">${escapeHtml(res.error || 'No results found')}</p>`;
+      if (contToken) loadMoreBtn.style.display = 'block';
+    } catch (err) {
+      results.innerHTML = `<div class="error-msg">${escapeHtml(err.message)}</div>`;
+    }
+  });
+
+  communityContent.addEventListener('click', async (e) => {
+    const toggle = e.target.closest('.community-comments-btn');
+    const more = e.target.closest('.community-comments-more');
+    const box = document.getElementById(`cc-${(toggle || more)?.dataset.post}`);
+    if (!box) return;
+    if (toggle && box.dataset.loaded) {
+      box.hidden = !box.hidden;
+      return;
+    }
+    box.dataset.loaded = '1';
+    box.hidden = false;
+    more?.remove();
+    const postId = (toggle || more).dataset.post;
+    try {
+      const res = await getPostComments(postId, channelId, box.dataset.token || null);
+      if (res.error && !res.comments?.length) {
+        box.insertAdjacentHTML('beforeend', `<p style="color:var(--text-muted)">${escapeHtml(res.error)}</p>`);
+        delete box.dataset.loaded;
+        return;
+      }
+      box.insertAdjacentHTML('beforeend', (res.comments || []).map(c => renderComment(c, postId)).join(''));
+      box.dataset.token = res.continuationToken || '';
+      if (res.continuationToken) {
+        box.insertAdjacentHTML('beforeend', `<button class="load-more community-comments-more" data-post="${postId}">Load more</button>`);
+      }
+      attachReplyListeners(postId, '', true);
+    } catch {
+      box.insertAdjacentHTML('beforeend', '<p style="color:var(--text-muted)">Failed to load comments</p>');
+    }
+  });
 
   
   const tabs = app.querySelectorAll('.channel-tab');
@@ -146,7 +246,22 @@ export async function renderChannel(app, params) {
 
       try {
         let tabData;
-        if (newTab === 'videos') {
+        if (newTab === 'search') {
+          contToken = '';
+          content.innerHTML = `
+            <form class="channel-search" style="grid-column:1/-1;">
+              <input type="search" class="form-input" placeholder="Search this channel">
+              <button type="submit" class="channel-search-btn">Search</button>
+            </form>
+            <div id="channel-search-results" style="display:contents;"></div>
+          `;
+          content.querySelector('input').focus();
+        } else if (newTab === 'home' || newTab === 'releases') {
+          tabData = newTab === 'home' ? await getChannelHome(channelId) : await getChannelReleases(channelId);
+          contToken = '';
+          content.innerHTML = renderSections(tabData.sections || [])
+            || '<p style="color:var(--text-muted);grid-column:1/-1;">Nothing here</p>';
+        } else if (newTab === 'videos') {
           tabData = await getChannel(channelId);
           contToken = tabData.videosContinuationToken || '';
           content.innerHTML = (tabData.videos || []).map(v => videoCard(v)).join('');
@@ -200,7 +315,7 @@ export async function renderChannel(app, params) {
       try {
         const more = await getChannelContinuation(channelId, contToken);
         for (const item of more.items || []) {
-          content.insertAdjacentHTML('beforeend', videoCard(item));
+          content.insertAdjacentHTML('beforeend', renderItem(item));
         }
         contToken = more.continuationToken || '';
         if (!contToken) loadMoreBtn.style.display = 'none';
@@ -210,6 +325,8 @@ export async function renderChannel(app, params) {
       }
     });
   }
+
+  app.querySelector('[data-tab="home"]').click();
 
   const subBtn = document.getElementById('sub-btn');
   if (subBtn) {
@@ -235,13 +352,27 @@ export async function renderChannel(app, params) {
   }
 }
 
+function renderItem(item) {
+  if (item.type === 'playlist') return playlistCard(item);
+  if (item.type === 'channel') {
+    return `
+      <a href="#/channel/${encodeURIComponent(item.id)}" class="channel-card">
+        <div class="channel-card-avatar"><img src="${proxyImageUrl(item.iconUrl || '')}" alt="" loading="lazy"></div>
+        <div>
+          <div class="channel-card-name">${escapeHtml(item.name || '')}${verifiedBadge(item.verified)}</div>
+          <div class="channel-card-meta">${escapeHtml(item.subscribers || '')}</div>
+        </div>
+      </a>
+    `;
+  }
+  return videoCard(item);
+}
+
 function renderSortButtons(sorts) {
-  const btnStyle = 'padding:4px 12px; border-radius:16px; border:1px solid var(--border-color); background:var(--bg-card); color:var(--text-main);';
-  return `
-  ${sorts.newest ? `<button class="sort-btn active" data-token="${sorts.newest}" style="${btnStyle}">Newest</button>` : ''}
-  ${sorts.popular ? `<button class="sort-btn" data-token="${sorts.popular}" style="${btnStyle}">Popular</button>` : ''}
-  ${sorts.oldest ? `<button class="sort-btn" data-token="${sorts.oldest}" style="${btnStyle}">Oldest</button>` : ''}
-  `;
+  return [['newest', 'Newest'], ['popular', 'Popular'], ['oldest', 'Oldest']]
+    .filter(([key]) => sorts[key])
+    .map(([key, label]) => `<button class="sort-btn${key === 'newest' ? ' active' : ''}" data-token="${sorts[key]}">${label}</button>`)
+    .join('');
 }
 
 function playlistCard(p) {
@@ -264,7 +395,7 @@ function playlistCard(p) {
         </div>
         <div class="video-card-info">
           <div class="video-card-title">${escapeHtml(p.title || '')}</div>
-          <div class="video-card-meta">Playlist</div>
+          <div class="video-card-meta">${escapeHtml(p.subtitle || 'Playlist')}</div>
         </div>
       </a>
     </div>
@@ -272,19 +403,32 @@ function playlistCard(p) {
 }
 
 function renderCommunityPost(p) {
+  const channelHref = p.authorId
+    ? `#/channel/${encodeURIComponent(p.authorId)}`
+    : (p.authorUrl ? `#${p.authorUrl.startsWith('/') ? p.authorUrl : '/' + p.authorUrl}` : '');
+
+  const authorHtml = channelHref
+    ? `<a href="${channelHref}" style="font-weight:600;color:var(--text-primary);text-decoration:none;">${escapeHtml(p.authorName || '')}</a>`
+    : `<div style="font-weight:600;">${escapeHtml(p.authorName || '')}</div>`;
+
+  const avatarHtml = channelHref
+    ? `<a href="${channelHref}"><img src="${proxyImageUrl(p.authorIconUrl || '')}" alt="" style="width:40px; height:40px; border-radius:50%;"></a>`
+    : `<img src="${proxyImageUrl(p.authorIconUrl || '')}" alt="" style="width:40px; height:40px; border-radius:50%;">`;
+
   return `
     <div class="community-post" style="background:var(--bg-card); padding:1rem; border-radius:8px; margin-bottom:1rem; border:1px solid var(--border-color);">
       <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
-        <img src="${proxyImageUrl(p.authorIconUrl || '')}" alt="" style="width:40px; height:40px; border-radius:50%;">
+        ${avatarHtml}
         <div>
-          <div style="font-weight:600;">${escapeHtml(p.authorName || '')}</div>
+          ${authorHtml}
           <div style="font-size:0.85rem; color:var(--text-muted);">${escapeHtml(p.time || '')}</div>
         </div>
       </div>
       <div style="margin-bottom:12px; white-space:pre-wrap;">${escapeHtml(p.message || '')}</div>
       ${p.imageUrl ? `<img src="${proxyImageUrl(p.imageUrl)}" style="max-width:100%; border-radius:8px; margin-bottom:12px; max-height:500px; object-fit:contain;" alt="">` : ''}
       ${p.video ? `<div style="margin-bottom:12px; border:1px solid var(--border-color); border-radius:8px; overflow:hidden;">${videoCard(p.video)}</div>` : ''}
-      <div style="color:var(--text-muted);font-size:0.85rem;display:flex;align-items:center;gap:5px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 00-3-3l-4 9v11h11.28a2 2 0 002-1.7l1.38-9a2 2 0 00-2-2.3H14z"/><path d="M7 22H4a2 2 0 01-2-2v-7a2 2 0 012-2h3"/></svg> ${escapeHtml(p.upvotes || '0')}</div>
+      <div style="color:var(--text-muted);font-size:0.85rem;display:flex;align-items:center;gap:12px;"><span style="display:flex;align-items:center;gap:5px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 00-3-3l-4 9v11h11.28a2 2 0 002-1.7l1.38-9a2 2 0 00-2-2.3H14z"/><path d="M7 22H4a2 2 0 01-2-2v-7a2 2 0 012-2h3"/></svg> ${escapeHtml(p.upvotes || '0')}</span>${p.id ? `<button class="community-comments-btn" data-post="${p.id}" title="Comments"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>${escapeHtml(p.commentCount || '')}</button>` : ''}</div>
+      ${p.id ? `<div class="community-comments" id="cc-${p.id}" hidden></div>` : ''}
     </div>
   `;
 }

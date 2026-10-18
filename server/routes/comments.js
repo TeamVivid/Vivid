@@ -47,7 +47,7 @@ router.get('/:id/replies', async (req, res) => {
   try {
     const { continuation } = req.query;
     if (!continuation) return res.status(400).json({ error: 'Missing continuation' });
-    const result = await req.extractor.getCommentReplies(continuation);
+    const result = await req.extractor.getCommentReplies(continuation, req.query.web === '1');
     res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });

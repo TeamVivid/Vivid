@@ -18,8 +18,10 @@
 
 import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinctPlaylist, getThumbnailUrlExact,
   getThumbnailUrlClosest, getVideoThumbnailUrl, getVideoIdByUrl, getPlaylistIdByUrl,
-  convertUrlToMobile, parseQueryParams, getVideoIdFromThumbnailUrl, formatCount, formatWithCommas } from './utils.js';
-  import fetch from 'node-fetch';
+  convertUrlToMobile, hasVerifiedBadge, parseQueryParams, getVideoIdFromThumbnailUrl, formatCount, formatWithCommas } from './utils.js';
+import fetch from 'node-fetch';
+import { parseStoryboards } from './storyboards.js';
+import { WEB } from './constants.js';
 
   function findKey(node, key) {
     if (!node || typeof node !== 'object') return null;
@@ -33,20 +35,50 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
 
   async function fetchLikeDislikeCounts(videoId) {
     try {
-      const res = await fetch(`https://returnyoutubedislikeapi.com/votes?videoId=${videoId}`);
-      if (!res.ok) return { likes: 'N/A', dislikes: 'N/A' };
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      const res = await fetch(`https://returnyoutubedislikeapi.com/votes?videoId=${videoId}`, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (!res.ok) return { dislikes: 'N/A', dislikesExact: 0, rating: 0 };
       const data = await res.json();
       return {
-        likes: data.likes != null ? formatCount(data.likes) : '0',
         dislikes: data.dislikes != null ? formatCount(data.dislikes) : '0',
-        likesExact: data.likes || 0,
         dislikesExact: data.dislikes || 0,
         rating: data.rating || 0,
-        viewCount: data.viewCount || 0,
       };
     } catch (e) {
-      return { likes: 'N/A', dislikes: 'N/A' };
+      return { dislikes: 'N/A', dislikesExact: 0, rating: 0 };
     }
+  }
+
+  function extractLikesFromNext(data) {
+    let likes = '';
+    let likesExact = 0;
+
+    function walk(node) {
+      if (!node || typeof node !== 'object') return;
+      if (node.segmentedLikeDislikeButtonViewModel) {
+        const vm = node.segmentedLikeDislikeButtonViewModel;
+        const btn = vm.likeButtonViewModel?.likeButtonViewModel?.toggleButtonViewModel?.toggleButtonViewModel;
+        const title = btn?.defaultButtonViewModel?.buttonViewModel?.title || btn?.toggledButtonViewModel?.buttonViewModel?.title;
+        if (title && !likes) likes = title;
+      }
+      if (node.segmentedLikeDislikeButtonRenderer) {
+        const r = node.segmentedLikeDislikeButtonRenderer;
+        const title = r.likeButton?.toggleButtonRenderer?.defaultText?.simpleText || r.likeButton?.toggleButtonRenderer?.defaultText?.runs?.[0]?.text;
+        if (title && !likes) likes = title;
+      }
+      if (node.listItemLikeCountViewModel?.valueIfLiked) {
+        const str = node.listItemLikeCountViewModel.valueIfLiked;
+        const num = parseInt(str.replace(/[^0-9]/g, ''), 10);
+        if (num && !likesExact) likesExact = num;
+      }
+      for (const v of Object.values(node)) {
+        walk(v);
+      }
+    }
+    walk(data);
+    return { likes, likesExact };
   }
 
   function extractSlimMetadata(renderer, result) {
@@ -77,11 +109,47 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
         name: owner.channelName || '',
         subscribers: getTextFromObject(owner.expandedSubtitle),
         iconUrl: getThumbnailUrlExact(owner?.thumbnail?.thumbnails, 72),
+        verified: hasVerifiedBadge(owner.ownerBadges || owner.badges),
       };
     }
   }
 
   function extractSuggestionItem(content) {
+    if (content.lockupViewModel && content.lockupViewModel.contentType === 'LOCKUP_CONTENT_TYPE_VIDEO') {
+      const lm = content.lockupViewModel;
+      const videoId = lm.contentId || '';
+      if (videoId) {
+        const meta = lm.metadata?.lockupMetadataViewModel;
+        const title = meta?.title?.content || '';
+        const author = meta?.metadata?.contentMetadataViewModel?.metadataRows?.[0]?.metadataParts?.[0]?.text?.content || '';
+        const avatarTap = meta?.image?.decoratedAvatarViewModel?.rendererContext?.commandContext?.onTap?.innertubeCommand?.browseEndpoint;
+        const authorId = avatarTap?.browseId || '';
+        const authorUrl = avatarTap?.canonicalBaseUrl || (authorId ? `/channel/${authorId}` : '');
+        const metaRows = meta?.metadata?.contentMetadataViewModel?.metadataRows || [];
+        const rawViews = metaRows[1]?.metadataParts?.[0]?.text?.content || '';
+        const views = metaRows[1]?.metadataParts?.[0]?.accessibilityLabel || (rawViews ? `${rawViews} views` : '');
+        const publishDate = metaRows[1]?.metadataParts?.[1]?.accessibilityLabel || metaRows[1]?.metadataParts?.[1]?.text?.content || '';
+        const badges = (lm.contentImage?.thumbnailViewModel?.overlays || [])
+          .flatMap(o => o.thumbnailBottomOverlayViewModel?.badges || []);
+        const duration = badges.map(b => b.thumbnailBadgeViewModel?.text).find(Boolean) || '';
+        const sources = lm.contentImage?.thumbnailViewModel?.image?.sources || [];
+        const thumb = sources[sources.length - 1]?.url || getVideoThumbnailUrl(videoId);
+        return {
+          type: 'video',
+          videoId,
+          url: `/watch?v=${videoId}`,
+          title,
+          duration,
+          views,
+          publishDate,
+          author,
+          authorId,
+          authorUrl,
+          verified: hasVerifiedBadge(meta?.metadata?.contentMetadataViewModel?.metadataRows?.[0]?.metadataParts?.[0]),
+          thumbnailUrl: thumb,
+        };
+      }
+    }
     if (content.compactVideoRenderer) {
       return { type: 'video', ...parseSuccinctVideo(content.compactVideoRenderer) };
     }
@@ -101,13 +169,71 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
     return null;
   }
 
+  function parseDescriptionSections(data) {
+    const body = findKey(data, 'structuredDescriptionContentRenderer');
+    const linkOf = (endpoint) => {
+      const url = endpoint?.commandMetadata?.webCommandMetadata?.url
+        || (endpoint?.watchEndpoint?.videoId ? `/watch?v=${endpoint.watchEndpoint.videoId}` : '');
+      return /^\/(watch|channel|@|playlist)/.test(url) ? url : '';
+    };
+    const lastUrl = (sources) => sources?.length ? sources[sources.length - 1].url : '';
+    const attributeItem = (v) => ({
+      title: v.title || '',
+      subtitle: v.subtitle || '',
+      secondarySubtitle: v.secondarySubtitle?.content || '',
+      imageUrl: lastUrl(v.image?.sources),
+      url: linkOf(v.onTap?.innertubeCommand),
+    });
+    const sections = [];
+    for (const item of body?.items || []) {
+      const list = item.horizontalCardListRenderer;
+      if (list) {
+        const items = (list.cards || []).map(c => c.videoAttributeViewModel).filter(Boolean).map(attributeItem);
+        if (items.length) {
+          sections.push({ title: getTextFromObject(list.header?.richListHeaderRenderer?.title), subtitle: '', items });
+        }
+      }
+      const music = item.videoDescriptionMusicSectionRenderer;
+      if (music) {
+        const items = (music.carouselLockups || []).map(l => l.carouselLockupRenderer).filter(Boolean).map(l => {
+          const rows = {};
+          for (const row of l.infoRows || []) {
+            const r = row.infoRowRenderer;
+            const value = getTextFromObject(r?.defaultMetadata) || getTextFromObject(r?.expandedMetadata);
+            if (r && value) rows[getTextFromObject(r.title).toUpperCase()] = value;
+          }
+          const [song, artist, album] = [rows.SONG, rows.ARTIST, rows.ALBUM];
+          const video = l.videoLockup?.compactVideoRenderer;
+          return {
+            title: song || getTextFromObject(video?.title),
+            subtitle: artist || '',
+            secondarySubtitle: album || '',
+            imageUrl: lastUrl(video?.thumbnail?.thumbnails),
+            url: video?.videoId ? `/watch?v=${video.videoId}` : '',
+          };
+        }).filter(i => i.title);
+        if (items.length) {
+          sections.push({ title: getTextFromObject(music.sectionTitle), subtitle: getTextFromObject(music.subHeaderText), items });
+        }
+      }
+      const games = item.videoAttributesSectionViewModel;
+      if (games) {
+        const items = (games.videoAttributeViewModels || []).map(c => c.videoAttributeViewModel).filter(Boolean).map(attributeItem).filter(i => i.title);
+        if (items.length) {
+          sections.push({ title: games.headerTitle || 'Games', subtitle: '', items });
+        }
+      }
+    }
+    return sections;
+  }
+
   export async function getVideoDetail(client, videoId, playlistId = null) {
     const result = {
       videoId,
       url: `/watch?v=${videoId}`,
       title: '',
       description: '',
-      author: { id: '', name: '', subscribers: '', iconUrl: '' },
+      author: { id: '', name: '', subscribers: '', iconUrl: '', verified: false },
       views: '',
       publishDate: '',
       likes: '0',
@@ -117,6 +243,7 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
       isLivestream: false,
       isUpcoming: false,
       suggestions: [],
+      descriptionSections: [],
       suggestionsContinuationToken: '',
       comments: {
         continuationToken: '',
@@ -124,11 +251,24 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
         disabled: true,
       },
       playlist: null,
+      storyboards: null,
       error: '',
     };
 
     try {
-      const nextData = await client.next(videoId, playlistId);
+      const promises = [
+        client.next(videoId, playlistId),
+        client._post(`${WEB.apiUrl}next?prettyPrint=false`, {
+          context: client._makeContext(WEB),
+          videoId,
+          ...(playlistId ? { playlistId } : {})
+        }, WEB).catch(() => null)
+      ];
+      if (playlistId) {
+        promises.push(getPlaylist(client, playlistId).catch(() => null));
+      }
+      const [nextData, webNextData, plData] = await Promise.all(promises);
+      result.storyboards = parseStoryboards(nextData.playerResponse?.storyboards || nextData.storyboards);
       const watchNext = nextData?.contents?.singleColumnWatchNextResults;
 
       if (!watchNext) {
@@ -158,6 +298,7 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
                   const owner = meta.owner.videoOwnerRenderer;
                   result.author.name = getTextFromObject(owner.title);
                   result.author.subscribers = getTextFromObject(owner.subscriberCountText);
+                  result.author.verified = hasVerifiedBadge(owner.badges);
                   if (owner.navigationEndpoint?.browseEndpoint?.browseId) {
                     result.author.id = owner.navigationEndpoint.browseEndpoint.browseId;
                   }
@@ -208,6 +349,7 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
                   name: owner.channelName || '',
                   subscribers: getTextFromObject(owner.expandedSubtitle),
                   iconUrl: getThumbnailUrlExact(owner?.thumbnail?.thumbnails, 72),
+                  verified: hasVerifiedBadge(owner.ownerBadges || owner.badges),
                 };
               }
               if (item.slimVideoDescriptionRenderer) {
@@ -223,7 +365,9 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
         }
       }
 
-      if (watchNext?.results?.results?.contents?.[0]?.videoPrimaryInfoRenderer?.viewCount?.videoViewCountRenderer?.isLive) {
+      if (watchNext?.results?.results?.contents?.[0]?.videoPrimaryInfoRenderer?.viewCount?.videoViewCountRenderer?.isLive
+        || !!findKey(webNextData, 'isLive')
+        || !!findKey(nextData, 'isLive')) {
         result.isLivestream = true;
       }
 
@@ -271,15 +415,26 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
         }
       }
 
-      const chat = findKey(nextData, 'liveChatRenderer');
-      const chatToken = chat?.continuations?.[0]?.reloadContinuationData?.continuation || '';
+      const chat = findKey(webNextData, 'liveChatRenderer') || findKey(nextData, 'liveChatRenderer');
+      const chatToken = chat?.continuations?.[0]?.reloadContinuationData?.continuation
+        || chat?.continuations?.[0]?.invalidationContinuationData?.continuation
+        || chat?.continuations?.[0]?.timedContinuationData?.continuation
+        || chat?.continuations?.[0]?.liveChatReplayContinuationData?.continuation
+        || '';
       if (chatToken) {
         const modes = chat.header?.liveChatHeaderRenderer?.viewSelector?.sortFilterSubMenuRenderer?.subMenuItems || [];
         result.liveChat = {
           token: chatToken,
           isReplay: !!chat.isReplay,
           modes: modes
-            .map(m => ({ title: m.title || '', continuation: m.continuation?.reloadContinuationData?.continuation || '', selected: !!m.selected }))
+            .map(m => ({
+              title: m.title || '',
+              continuation: m.continuation?.reloadContinuationData?.continuation
+                || m.continuation?.invalidationContinuationData?.continuation
+                || m.continuation?.timedContinuationData?.continuation
+                || '',
+              selected: !!m.selected
+            }))
             .filter(m => m.continuation),
         };
         if (!chat.isReplay) result.isLivestream = true;
@@ -310,10 +465,62 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
         }
       }
 
+      if (plData?.videos?.length && result.playlist?.videos?.length) {
+        const plMap = new Map();
+        for (const pv of plData.videos) {
+          const vid = pv.videoId || pv.id;
+          if (vid) plMap.set(vid, pv);
+        }
+        for (const v of result.playlist.videos) {
+          const vid = v.videoId || v.id;
+          const full = plMap.get(vid);
+          if (full) {
+            if (!v.views && full.views) v.views = full.views;
+            if (!v.publishDate && full.publishDate) v.publishDate = full.publishDate;
+            if (!v.authorId && full.authorId) v.authorId = full.authorId;
+            if (!v.authorUrl && full.authorUrl) v.authorUrl = full.authorUrl;
+          }
+        }
+      }
+
+      if (webNextData) {
+        result.descriptionSections = parseDescriptionSections(webNextData);
+        const webOwner = findKey(webNextData, 'videoOwnerRenderer');
+        if (webOwner && hasVerifiedBadge(webOwner.badges)) result.author.verified = true;
+        const webSuggestionsMap = new Map();
+        const webSecResults = webNextData?.contents?.twoColumnWatchNextResults?.secondaryResults?.secondaryResults?.results || [];
+        for (const sec of webSecResults) {
+          for (const item of sec.itemSectionRenderer?.contents || []) {
+            if (item.lockupViewModel && item.lockupViewModel.contentType === 'LOCKUP_CONTENT_TYPE_VIDEO') {
+              const lm = item.lockupViewModel;
+              const vid = lm.contentId || '';
+              if (vid) {
+                const meta = lm.metadata?.lockupMetadataViewModel;
+                const metaRows = meta?.metadata?.contentMetadataViewModel?.metadataRows || [];
+                const rawViews = metaRows[1]?.metadataParts?.[0]?.text?.content || '';
+                const views = metaRows[1]?.metadataParts?.[0]?.accessibilityLabel || (rawViews ? `${rawViews} views` : '');
+                const publishDate = metaRows[1]?.metadataParts?.[1]?.accessibilityLabel || metaRows[1]?.metadataParts?.[1]?.text?.content || '';
+                webSuggestionsMap.set(vid, { views, publishDate });
+              }
+            }
+          }
+        }
+        for (const s of result.suggestions) {
+          const vid = s.videoId || s.id;
+          const webMeta = webSuggestionsMap.get(vid);
+          if (webMeta) {
+            if (!s.views && webMeta.views) s.views = webMeta.views;
+            if (!s.publishDate && webMeta.publishDate) s.publishDate = webMeta.publishDate;
+          }
+        }
+      }
+
+      const itLikes = extractLikesFromNext(nextData);
+      if (itLikes.likes) result.likes = itLikes.likes;
+      if (itLikes.likesExact) result.likesExact = itLikes.likesExact;
+
       const rydData = await fetchLikeDislikeCounts(videoId);
-      result.likes = rydData.likes;
       result.dislikes = rydData.dislikes;
-      result.likesExact = rydData.likesExact;
       result.dislikesExact = rydData.dislikesExact;
       result.rating = rydData.rating;
 
@@ -373,12 +580,30 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
       const videoId = r.videoId;
       const thumbs = r.thumbnail?.thumbnails || [];
       const thumb = thumbs[thumbs.length - 1]?.url || '';
+      const byline = r.shortBylineText || r.longBylineText;
+      const author = getTextFromObject(byline) || '';
+      const authorId = byline?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.browseId
+        || r.channelThumbnailSupportedRenderers?.channelThumbnailWithLinkRenderer?.navigationEndpoint?.browseEndpoint?.browseId
+        || '';
+      const authorUrl = byline?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.canonicalBaseUrl
+        || (authorId ? `/channel/${authorId}` : '');
+      let views = getTextFromObject(r.shortViewCountText || r.viewCountText);
+      let publishDate = getTextFromObject(r.publishedTimeText);
+      if ((!views || !publishDate) && r.videoInfo?.runs) {
+        const parts = r.videoInfo.runs.map(run => run.text).filter(t => t && t.trim() !== '•');
+        if (!views && parts[0]) views = parts[0].trim();
+        if (!publishDate && parts[1]) publishDate = parts[1].trim();
+      }
       return {
         videoId,
         id: videoId,
         title: r.title?.runs?.[0]?.text || r.title?.simpleText || '',
-        author: r.shortBylineText?.runs?.[0]?.text || r.longBylineText?.runs?.[0]?.text || '',
-        authorName: r.shortBylineText?.runs?.[0]?.text || r.longBylineText?.runs?.[0]?.text || '',
+        author,
+        authorName: author,
+        authorId,
+        authorUrl,
+        views,
+        publishDate,
         duration: r.lengthText?.simpleText || r.thumbnailOverlays?.[0]?.thumbnailOverlayTimeStatusRenderer?.text?.simpleText || '',
         thumbnailUrl: thumb,
         url: `/watch?v=${videoId}&list=${playlistId}`,
@@ -397,7 +622,13 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
         if (videoId) {
           const title = lm.metadata?.lockupMetadataViewModel?.title?.content || '';
           const author = lm.metadata?.lockupMetadataViewModel?.metadata?.contentMetadataViewModel?.metadataRows?.[0]?.metadataParts?.[0]?.text?.content || '';
-          const views = lm.metadata?.lockupMetadataViewModel?.metadata?.contentMetadataViewModel?.metadataRows?.[1]?.metadataParts?.[0]?.text?.content || '';
+          const avatarTap = lm.metadata?.lockupMetadataViewModel?.image?.decoratedAvatarViewModel?.rendererContext?.commandContext?.onTap?.innertubeCommand?.browseEndpoint;
+          const authorId = avatarTap?.browseId || '';
+          const authorUrl = avatarTap?.canonicalBaseUrl || (authorId ? `/channel/${authorId}` : '');
+          const metaRows = lm.metadata?.lockupMetadataViewModel?.metadata?.contentMetadataViewModel?.metadataRows || [];
+          const rawViews = metaRows[1]?.metadataParts?.[0]?.text?.content || '';
+          const views = metaRows[1]?.metadataParts?.[0]?.accessibilityLabel || (rawViews ? `${rawViews}` : '');
+          const publishDate = metaRows[1]?.metadataParts?.[1]?.accessibilityLabel || metaRows[1]?.metadataParts?.[1]?.text?.content || '';
           let duration = '';
           const badges = lm.contentImage?.thumbnailViewModel?.overlays?.[0]?.thumbnailBottomOverlayViewModel?.badges || [];
           if (badges.length > 0) {
@@ -411,7 +642,10 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
             title,
             author,
             authorName: author,
+            authorId,
+            authorUrl,
             views,
+            publishDate,
             duration,
             thumbnailUrl: thumb,
             url: `/watch?v=${videoId}&list=${playlistId}`,
@@ -453,8 +687,19 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
       if (pageHeader) {
         result.title = pageHeader.title?.dynamicTextViewModel?.text?.content || '';
         const rows = pageHeader.metadata?.contentMetadataViewModel?.metadataRows || [];
-        if (rows[0]?.metadataParts?.[0]?.text?.content) {
-          result.authorName = rows[0].metadataParts[0].text.content;
+        const authorPart = rows[0]?.metadataParts?.[0];
+        if (authorPart?.avatarStack?.avatarStackViewModel?.text?.content) {
+          result.authorName = authorPart.avatarStack.avatarStackViewModel.text.content;
+          const cmd = authorPart.avatarStack.avatarStackViewModel.rendererContext?.commandContext?.onTap?.innertubeCommand
+            || authorPart.avatarStack.avatarStackViewModel.text?.commandRuns?.[0]?.onTap?.innertubeCommand;
+          if (cmd?.browseEndpoint?.browseId) {
+            result.authorId = cmd.browseEndpoint.browseId;
+          }
+          if (cmd?.browseEndpoint?.canonicalBaseUrl) {
+            result.authorUrl = cmd.browseEndpoint.canonicalBaseUrl;
+          }
+        } else if (authorPart?.text?.content) {
+          result.authorName = authorPart.text.content;
         }
         if (rows[1]?.metadataParts?.[0]?.text?.content) {
           result.videoCount = parseInt(rows[1].metadataParts[0].text.content) || 0;
@@ -477,6 +722,13 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
         header.ownerText?.runs?.[0]?.text ||
         header.subtitle?.runs?.[0]?.text ||
         header.channelHandleText?.runs?.[0]?.text || '';
+        const ownerBrowse = header.ownerText?.runs?.[0]?.navigationEndpoint?.browseEndpoint;
+        if (!result.authorId && ownerBrowse?.browseId) {
+          result.authorId = ownerBrowse.browseId;
+        }
+        if (!result.authorUrl && (ownerBrowse?.canonicalBaseUrl || result.authorId)) {
+          result.authorUrl = ownerBrowse?.canonicalBaseUrl || `/channel/${result.authorId}`;
+        }
         result.viewCount = result.viewCount || header.viewCountText?.simpleText || '';
         result.videoCount = result.videoCount || parseInt(header.numVideosText?.runs?.[0]?.text || '0') || 0;
       }

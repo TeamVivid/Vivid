@@ -18,7 +18,7 @@
 
 import { getTextFromObject, getThumbnailUrlExact, getThumbnailUrlClosest } from './utils.js';
 
-function parseComment(commentRenderer, thumbnailHeight = 48) {
+function parseComment(commentRenderer, thumbnailHeight = 88) {
   return {
     id: commentRenderer.commentId || '',
     content: getTextFromObject(commentRenderer.contentText),
@@ -34,14 +34,42 @@ function parseComment(commentRenderer, thumbnailHeight = 48) {
     creatorHeartIcon: getThumbnailUrlExact(
       (commentRenderer.actionButtons?.commentActionButtonsRenderer?.creatorHeart?.creatorHeartRenderer || 
        commentRenderer.creatorHeart?.creatorHeartRenderer)?.creatorThumbnail?.thumbnails, 
-      32
+      48
     ),
     repliesContinuationToken: commentRenderer.replies?.commentRepliesRenderer?.contents?.[0]?.continuationItemRenderer?.button?.buttonRenderer?.command?.continuationCommand?.token 
                              || commentRenderer.replies?.commentRepliesRenderer?.contents?.[0]?.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token || '',
   };
 }
 
-export async function getComments(client, continuationToken, type = 1) {
+function parseViewModelComment(vm, entities) {
+  const e = entities[(vm.commentViewModel || vm).commentKey];
+  if (!e) return null;
+  return {
+    id: e.properties?.commentId || '',
+    content: e.properties?.content?.content || '',
+    authorName: e.author?.displayName || '',
+    authorId: e.author?.channelId || '',
+    authorIconUrl: e.author?.avatarThumbnailUrl || '',
+    publishDate: e.properties?.publishedTime || '',
+    upvotes: e.toolbar?.likeCountNotliked || '',
+    replyCount: Number(e.toolbar?.replyCount) || 0,
+    authorIsChannelOwner: !!e.author?.isCreator,
+    isPinned: false,
+    creatorHeart: false,
+    creatorHeartIcon: '',
+    repliesContinuationToken: '',
+  };
+}
+
+function indexEntities(data) {
+  const entities = {};
+  for (const m of data?.frameworkUpdates?.entityBatchUpdate?.mutations || []) {
+    if (m.payload?.commentEntityPayload) entities[m.entityKey] = m.payload.commentEntityPayload;
+  }
+  return entities;
+}
+
+export async function getComments(client, continuationToken, type = 1, useWeb = false) {
   const result = {
     comments: [],
     continuationToken: '',
@@ -73,7 +101,8 @@ export async function getComments(client, continuationToken, type = 1) {
         }
       }
     } else {
-      const data = await client.nextContinuation(continuationToken);
+      const data = useWeb ? await client.browseWeb(null, null, continuationToken) : await client.nextContinuation(continuationToken);
+      const entities = indexEntities(data);
       result.type = -1;
 
       const actions = data.onResponseReceivedEndpoints || data.onResponseReceivedActions || [];
@@ -84,7 +113,8 @@ export async function getComments(client, continuationToken, type = 1) {
 
         for (const item of items) {
           if (item.commentThreadRenderer) {
-            result.comments.push(parseCommentThread(item));
+            const parsed = parseCommentThread(item, entities);
+            if (parsed) result.comments.push(parsed);
           }
           if (item.continuationItemRenderer) {
             result.continuationToken =
@@ -103,9 +133,12 @@ export async function getComments(client, continuationToken, type = 1) {
   return result;
 }
 
-function parseCommentThread(commentThreadRenderer) {
+function parseCommentThread(commentThreadRenderer, entities = {}) {
   const ctr = commentThreadRenderer.commentThreadRenderer || commentThreadRenderer;
-  const comment = parseComment(ctr?.comment?.commentRenderer || {});
+  const comment = ctr.commentViewModel
+    ? parseViewModelComment(ctr.commentViewModel, entities)
+    : parseComment(ctr?.comment?.commentRenderer || {});
+  if (!comment) return null;
 
   const replyContents = ctr?.replies?.commentRepliesRenderer?.contents || [];
   for (const r of replyContents) {
@@ -121,7 +154,7 @@ function parseCommentThread(commentThreadRenderer) {
   return comment;
 }
 
-export async function getCommentReplies(client, continuationToken) {
+export async function getCommentReplies(client, continuationToken, useWeb = false) {
   const result = {
     replies: [],
     continuationToken: '',
@@ -129,7 +162,8 @@ export async function getCommentReplies(client, continuationToken) {
   };
 
   try {
-    const data = await client.nextContinuation(continuationToken);
+    const data = useWeb ? await client.browseWeb(null, null, continuationToken) : await client.nextContinuation(continuationToken);
+    const entities = indexEntities(data);
 
     const actions = data.onResponseReceivedEndpoints || data.onResponseReceivedActions || [];
     for (const endpoint of actions) {
@@ -140,6 +174,9 @@ export async function getCommentReplies(client, continuationToken) {
         for (const item of items) {
           if (item.commentRenderer) {
             result.replies.push(parseComment(item.commentRenderer, 32));
+          } else if (item.commentViewModel) {
+            const parsed = parseViewModelComment(item.commentViewModel, entities);
+            if (parsed) result.replies.push(parsed);
           }
           if (item.continuationItemRenderer) {
             const cont = item.continuationItemRenderer;

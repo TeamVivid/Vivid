@@ -17,7 +17,7 @@
  */
 
 
-import { getLiveChat, proxyImageUrl } from './api.js';
+import { getLiveChat, getLiveChatModes, proxyImageUrl } from './api.js';
 
 const MAX_MESSAGES = 300;
 const REPLAY_MIN_INTERVAL_MS = 1500;
@@ -89,6 +89,8 @@ export function startLiveChat({ videoId, chat, player, listEl, modeEl, statusEl 
   let fetching = false;
   let nextFetchAt = 0;
   let lastCt = -1;
+  let failures = 0;
+  let refreshed = false;
 
   const setStatus = (text) => {
     if (statusEl) statusEl.textContent = text;
@@ -124,6 +126,8 @@ export function startLiveChat({ videoId, chat, player, listEl, modeEl, statusEl 
     fetching = false;
     nextFetchAt = 0;
     lastCt = -1;
+    failures = 0;
+    refreshed = false;
     listEl.replaceChildren(el('div', 'chat-empty', chat.isReplay ? 'Loading replay...' : 'Waiting for messages...'));
   };
 
@@ -137,11 +141,27 @@ export function startLiveChat({ videoId, chat, player, listEl, modeEl, statusEl 
       append(data.messages || []);
       removeMessages(data.removed || []);
       if (!data.continuationToken) {
-        setStatus(data.error ? 'Chat unavailable' : 'Chat ended');
-        return;
+        if (data.error && !refreshed) {
+          refreshed = true;
+          const fresh = await getLiveChatModes(videoId).catch(() => null);
+          if (gen !== generation || stopped) return;
+          const mode = fresh?.modes?.[modeEl ? modeEl.selectedIndex : -1];
+          if (mode?.continuation || fresh?.token) {
+            token = mode?.continuation || fresh.token;
+            pollTimer = setTimeout(pollLive, 500);
+            return;
+          }
+        }
+        if (!data.error || ++failures > 6) {
+          setStatus(data.error ? `Chat unavailable: ${data.error}` : 'Chat ended');
+          return;
+        }
+        delay = 4000;
+      } else {
+        failures = 0;
+        token = data.continuationToken;
+        delay = Math.min(Math.max(data.timeoutMs || 3000, 1000), 4000);
       }
-      token = data.continuationToken;
-      delay = Math.min(Math.max(data.timeoutMs || 5000, 1000), 15000);
     } catch {}
     pollTimer = setTimeout(pollLive, delay);
   }
@@ -200,9 +220,12 @@ export function startLiveChat({ videoId, chat, player, listEl, modeEl, statusEl 
   };
 
   if (modeEl) {
-    modeEl.addEventListener('change', () => {
+    modeEl.addEventListener('change', async () => {
       stopTimers();
-      start(modeEl.value);
+      const index = modeEl.selectedIndex;
+      const fresh = await getLiveChatModes(videoId).catch(() => null);
+      if (stopped) return;
+      start(fresh?.modes?.[index]?.continuation || modeEl.value);
     });
   }
 

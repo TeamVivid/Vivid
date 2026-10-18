@@ -58,14 +58,22 @@ export async function getTrending(client) {
 }
 
 function parseVideoRenderer(v) {
+  const byline = v.ownerText || v.shortBylineText || v.longBylineText;
+  const authorId = byline?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.browseId
+    || v.channelThumbnailSupportedRenderers?.channelThumbnailWithLinkRenderer?.navigationEndpoint?.browseEndpoint?.browseId
+    || '';
+  const authorUrl = byline?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.canonicalBaseUrl
+    || (authorId ? `/channel/${authorId}` : '');
   return {
     type: 'video',
     videoId: v.videoId,
     url: `/watch?v=${v.videoId}`,
     title: getTextFromObject(v.title),
     duration: getTextFromObject(v.lengthText),
-    author: getTextFromObject(v.ownerText || v.shortBylineText || v.longBylineText),
-    thumbnailUrl: `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`,
+    author: getTextFromObject(byline),
+    authorId,
+    authorUrl,
+    thumbnailUrl: `https://i.ytimg.com/vi/${v.videoId}/mqdefault.jpg`,
     views: getTextFromObject(v.shortViewCountText || v.viewCountText),
     publishDate: getTextFromObject(v.publishedTimeText),
   };
@@ -75,6 +83,9 @@ function parseLockup(l) {
   const meta = l.metadata?.lockupMetadataViewModel;
   const badges = (l.contentImage?.thumbnailViewModel?.overlays || [])
     .flatMap(o => o.thumbnailBottomOverlayViewModel?.badges || []);
+  const avatarTap = meta?.image?.decoratedAvatarViewModel?.rendererContext?.commandContext?.onTap?.innertubeCommand?.browseEndpoint;
+  const authorId = avatarTap?.browseId || '';
+  const authorUrl = avatarTap?.canonicalBaseUrl || (authorId ? `/channel/${authorId}` : '');
   return {
     type: 'video',
     videoId: l.contentId,
@@ -82,7 +93,9 @@ function parseLockup(l) {
     title: meta?.title?.content || '',
     duration: badges.map(b => b.thumbnailBadgeViewModel?.text).find(Boolean) || '',
     author: meta?.metadata?.contentMetadataViewModel?.metadataRows?.[0]?.metadataParts?.[0]?.text?.content || '',
-    thumbnailUrl: `https://i.ytimg.com/vi/${l.contentId}/hqdefault.jpg`,
+    authorId,
+    authorUrl,
+    thumbnailUrl: `https://i.ytimg.com/vi/${l.contentId}/mqdefault.jpg`,
     views: '',
     publishDate: '',
   };

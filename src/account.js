@@ -17,7 +17,7 @@
  */
 
 
-import { registerAccount, loginAccount, getAccountMe, syncAccount, logoutAccount } from './api.js';
+import { registerAccount, loginAccount, getAccountMe, syncAccount, logoutAccount, deleteAccount } from './api.js';
 import { getPlaylists, savePlaylists } from './playlistManager.js';
 
 const TOKEN_KEY = 'vivid_auth_token';
@@ -163,6 +163,17 @@ export function openAccountModal() {
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
               <span>Log Out</span>
             </button>
+            <button id="account-delete-btn" class="account-action-btn account-logout">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+              <span>Delete Account</span>
+            </button>
+            <form id="account-delete-form" style="display:none;">
+              <div class="form-group">
+                <label for="delete-password">Confirm your password to permanently delete your account and its synced data</label>
+                <input type="password" id="delete-password" class="form-input" required autocomplete="current-password">
+              </div>
+              <button type="submit" class="modal-btn-primary" style="width:100%; margin-top:1rem;">Delete Permanently</button>
+            </form>
           </div>
         </div>
       </div>
@@ -248,6 +259,8 @@ export function openAccountModal() {
     const logoutBtn = modal.querySelector('#account-logout-btn');
     const statusBox = modal.querySelector('#account-sync-status');
     const viewPlBtn = modal.querySelector('#account-view-pl-btn');
+    const deleteBtn = modal.querySelector('#account-delete-btn');
+    const deleteForm = modal.querySelector('#account-delete-form');
 
     if (viewPlBtn) viewPlBtn.addEventListener('click', close);
 
@@ -281,6 +294,27 @@ export function openAccountModal() {
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.3"/></svg>
         <span>Sync Subscriptions & Playlists</span>
       `;
+    });
+
+    deleteBtn.addEventListener('click', () => {
+      deleteForm.style.display = deleteForm.style.display === 'none' ? 'block' : 'none';
+    });
+
+    deleteForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        await deleteAccount(token, deleteForm.querySelector('#delete-password').value);
+      } catch (err) {
+        statusBox.textContent = err.message || 'Account deletion failed';
+        statusBox.className = 'modal-alert';
+        statusBox.style.display = 'block';
+        return;
+      }
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(USERNAME_KEY);
+      updateAuthHeaderBtn();
+      close();
+      window.dispatchEvent(new CustomEvent('vivid-auth-changed'));
     });
 
     logoutBtn.addEventListener('click', async () => {

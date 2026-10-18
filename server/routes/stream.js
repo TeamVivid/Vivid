@@ -17,7 +17,34 @@
  */
 
 import { Router } from 'express';
+import { mintCynTokens } from '../../extractor/absolutesolver/botguard.js';
 const router = Router();
+
+router.get('/:id/pot', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const clientKey = (req.query.client || 'web').toLowerCase();
+    let visitorData = req.query.visitorData || req.query.visitor_data || '';
+    if (!visitorData && req.extractor?.client) {
+      const isTv = clientKey === 'tv' || clientKey === 'tvhtml5' || clientKey === 'tv_simply';
+      if (isTv) {
+        visitorData = req.extractor.client.visitorData || await req.extractor.client.fetchTvVisitorData?.() || '';
+      } else {
+        visitorData = req.extractor.client.visitorData || await req.extractor.client.fetchVisitorData?.() || '';
+      }
+    }
+    const cyn = await mintCynTokens(id, visitorData, { clientKey, forceRefresh: true });
+    res.json({
+      poToken: cyn.sabrCynToken || cyn.playerCynToken || '',
+      playerPoToken: cyn.playerCynToken || '',
+      sabrPoToken: cyn.sabrCynToken || '',
+      gvsPoToken: cyn.sabrCynToken || '',
+      ttl: cyn.ttl || 0
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 router.get('/:id', async (req, res) => {
   try {

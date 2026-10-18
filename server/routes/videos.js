@@ -19,11 +19,44 @@
 import { Router } from 'express';
 const router = Router();
 
+const videoCache = new Map();
+const inFlightVideos = new Map();
+
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { list } = req.query;
-    const result = await req.extractor.getVideoDetail(id, list || null);
+    const { list, refresh } = req.query;
+    const cacheKey = `${id}:${list || ''}`;
+
+    if (!refresh) {
+      const cached = videoCache.get(cacheKey);
+      if (cached && Date.now() < cached.expiresAt) {
+        return res.json(cached.data);
+      }
+    }
+
+    if (inFlightVideos.has(cacheKey)) {
+      const data = await inFlightVideos.get(cacheKey);
+      return res.json(data);
+    }
+
+    const promise = req.extractor.getVideoDetail(id, list || null)
+      .then(result => {
+        if (result && !result.error) {
+          videoCache.set(cacheKey, { data: result, expiresAt: Date.now() + (result.isLivestream ? 60 * 1000 : 600 * 1000) });
+          if (videoCache.size > 200) {
+            const oldest = videoCache.keys().next().value;
+            videoCache.delete(oldest);
+          }
+        }
+        return result;
+      })
+      .finally(() => {
+        inFlightVideos.delete(cacheKey);
+      });
+
+    inFlightVideos.set(cacheKey, promise);
+    const result = await promise;
     res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });

@@ -17,10 +17,18 @@
  */
 
 import express from 'express';
-import { InnerTubeClient, livechat } from '../../extractor/index.js';
+import { livechat } from '../../extractor/index.js';
 
 const router = express.Router();
-const client = new InnerTubeClient();
+
+router.get('/:videoId/modes', async (req, res) => {
+  try {
+    const detail = await req.extractor.getVideoDetail(req.params.videoId);
+    res.json(detail.liveChat || { token: '', modes: [] });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 router.get('/:videoId', async (req, res) => {
   const { continuation, replay, offset } = req.query;
@@ -30,10 +38,11 @@ router.get('/:videoId', async (req, res) => {
   }
 
   try {
-    const result = await livechat.getLiveChat(client, continuation, {
+    const result = await livechat.getLiveChat(req.extractor.client, continuation, {
       replay: replay === '1',
       offsetMs: Number(offset) || 0,
     });
+    if (result.error) console.warn(`[livechat] ${req.params.videoId}: ${result.error}`);
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });

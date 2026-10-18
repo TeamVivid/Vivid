@@ -20,11 +20,14 @@
 import fs from 'fs';
 import path from 'path';
 import fetch from 'node-fetch';
+import { getCachedItem, setCachedItem } from './storage.js';
 
 const OAUTH_CLIENT_ID = '652469312169-4lvs9bnhr9lpns9v451j5oivd81vjvu1.apps.googleusercontent.com';
 const OAUTH_CLIENT_SECRET = '3fTWrBJI5Uojm1TK7_iJCW5Z';
 const OAUTH_TOKEN_URL = 'https://www.youtube.com/o/oauth2/token';
 const OAUTH_UA = 'com.google.android.apps.youtube.vr.pico/1.73.21(Linux; U; Android 10; en_US; A8110 Build/5.13.7) gzip';
+
+let cachedTokenData = null;
 
 function getTokenFilePath() {
   const localFile = path.resolve(process.cwd(), 'oauth2.json');
@@ -35,20 +38,25 @@ function getTokenFilePath() {
 }
 
 export function hasOAuthFile() {
+  if (cachedTokenData) return true;
   const file = getTokenFilePath();
   return fs.existsSync(file);
 }
 
 export async function getVrAuthorization() {
+  let tokenData = await getCachedItem('oauth2_token_data');
   const filePath = getTokenFilePath();
-  if (!fs.existsSync(filePath)) return null;
 
-  let tokenData;
-  try {
-    tokenData = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-  } catch {
-    return null;
+  if (!tokenData && fs.existsSync(filePath)) {
+    try {
+      tokenData = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    } catch {
+      return null;
+    }
   }
+
+  if (!tokenData) return null;
+  cachedTokenData = tokenData;
 
   const refreshToken = tokenData.refresh_token;
   if (!refreshToken) return null;
@@ -83,6 +91,9 @@ export async function getVrAuthorization() {
       tokenData.expires_at = now + Number(data.expires_in || 3600);
       try {
         fs.writeFileSync(filePath, JSON.stringify(tokenData, null, 2), 'utf-8');
+      } catch {}
+      try {
+        await setCachedItem('oauth2_token_data', tokenData);
       } catch {}
       return `Bearer ${data.access_token}`;
     }

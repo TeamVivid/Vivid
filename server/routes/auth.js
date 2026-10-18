@@ -18,7 +18,7 @@
 
 
 import { Router } from 'express';
-import { registerUser, loginUser, getUserByToken, logoutUser, syncUserData } from '../auth.js';
+import { registerUser, loginUser, getUserByToken, logoutUser, syncUserData, deleteUser } from '../auth.js';
 
 const router = Router();
 
@@ -70,6 +70,17 @@ router.post('/logout', (req, res) => {
   const token = getBearerToken(req);
   if (token) logoutUser(token);
   res.json({ success: true });
+});
+
+router.post('/delete', (req, res) => {
+  try {
+    const token = getBearerToken(req);
+    const { password } = req.body || {};
+    deleteUser(token, password);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(e.message === 'Unauthorized' ? 401 : 400).json({ error: e.message });
+  }
 });
 
 export default router;

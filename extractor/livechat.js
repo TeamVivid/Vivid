@@ -93,6 +93,14 @@ export async function getLiveChat(client, continuationToken, { replay = false, o
       return result;
     }
 
+    for (const cont of chat.continuations || []) {
+      const c = cont.timedContinuationData || cont.invalidationContinuationData
+        || cont.liveChatReplayContinuationData || cont.playerSeekContinuationData;
+      if (!c?.continuation) continue;
+      result.continuationToken = c.continuation;
+      result.timeoutMs = c.timeoutMs || c.timeUntilLastMessageMsec || 0;
+    }
+
     const handle = (action, offset) => {
       const item = action.addChatItemAction?.item;
       if (item) {
@@ -104,20 +112,14 @@ export async function getLiveChat(client, continuationToken, { replay = false, o
     };
 
     for (const action of chat.actions || []) {
-      if (action.replayChatItemAction) {
-        const offset = Number(action.replayChatItemAction.videoOffsetTimeMsec) || 0;
-        for (const inner of action.replayChatItemAction.actions || []) handle(inner, offset);
-      } else {
-        handle(action, 0);
-      }
-    }
-
-    for (const cont of chat.continuations || []) {
-      const c = cont.timedContinuationData || cont.invalidationContinuationData
-        || cont.liveChatReplayContinuationData || cont.playerSeekContinuationData;
-      if (!c?.continuation) continue;
-      result.continuationToken = c.continuation;
-      result.timeoutMs = c.timeoutMs || c.timeUntilLastMessageMsec || 0;
+      try {
+        if (action.replayChatItemAction) {
+          const offset = Number(action.replayChatItemAction.videoOffsetTimeMsec) || 0;
+          for (const inner of action.replayChatItemAction.actions || []) handle(inner, offset);
+        } else {
+          handle(action, 0);
+        }
+      } catch {}
     }
   } catch (e) {
     result.error = e.message;
