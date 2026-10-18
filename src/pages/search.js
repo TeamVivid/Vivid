@@ -49,22 +49,21 @@ export async function renderSearch(app, params) {
   const isListLayout = getSettings().layoutStyle === 'list';
 
   app.innerHTML = `
-    <h1 class="page-title">
-      Search: "${escapeHtml(query)}"
-      <span class="page-subtitle">${data.estimatedResults ? ` ${escapeHtml(data.estimatedResults)} results` : ''}</span>
-    </h1>
-    <div class="search-chips">${renderChips(query, filters, showShorts)}</div>
-    <button id="toggle-filters-btn" class="search-chip" style="margin-bottom:1rem;cursor:pointer;">Toggle Filters</button>
-    <div id="filters-container" style="display:none;">
-      ${renderFilters(query, filters)}
-    </div>
-    <div id="results-container">
-      ${results.length === 0 ? '<p style="color:var(--text-muted);padding:2rem;text-align:center">No results found</p>' : ''}
-      <div class="${isListLayout ? 'video-list' : 'video-grid'}" id="results-list">
-        ${results.map(r => renderResult(r, isListLayout)).join('')}
-      </div>
-    </div>
-    ${continuationToken ? '<button class="load-more" id="load-more-search">Load more</button>' : ''}
+  <h1 class="page-title">
+  Search: "${escapeHtml(query)}"
+  <span class="page-subtitle">${data.estimatedResults ? ` ${escapeHtml(data.estimatedResults)} results` : ''}</span>
+  </h1>
+  <div class="search-chips">${renderChips(query, filters, showShorts)}<button id="toggle-filters-btn" class="search-chip" style="cursor:pointer;flex-shrink:0;">Toggle Filters</button></div>
+  <div id="filters-container" style="display:none;">
+  ${renderFilters(query, filters)}
+  </div>
+  <div id="results-container">
+  ${results.length === 0 ? '<p style="color:var(--text-muted);padding:2rem;text-align:center">No results found</p>' : ''}
+  <div class="${isListLayout ? 'video-list' : 'video-grid'}" id="results-list">
+  ${results.map(r => renderResult(r, isListLayout)).join('')}
+  </div>
+  </div>
+  ${continuationToken ? '<button class="load-more" id="load-more-search">Load more</button>' : ''}
   `;
 
   const toggleBtn = document.getElementById('toggle-filters-btn');
@@ -84,9 +83,9 @@ export async function renderSearch(app, params) {
       app.querySelectorAll('.filter-select').forEach(s => {
         if (s.value) f[s.name] = s.value;
       });
-      let hash = `/results?search_query=${encodeURIComponent(query)}`;
-      for (const [k, v] of Object.entries(f)) hash += `&${k}=${v}`;
-      navigate(hash);
+        let hash = `/results?search_query=${encodeURIComponent(query)}`;
+        for (const [k, v] of Object.entries(f)) hash += `&${k}=${v}`;
+        navigate(hash);
     });
   });
 
@@ -113,10 +112,10 @@ export async function renderSearch(app, params) {
 
 const SEARCH_CHIPS = [
   { label: 'All', filters: {} },
-  { label: 'Shorts', filters: { type: 'shorts' } },
-  { label: 'Videos', filters: { type: 'video' } },
-  { label: 'Recently uploaded', filters: { sort_by: 'date' } },
-  { label: 'Live', filters: { features: 'live' } },
+{ label: 'Shorts', filters: { type: 'shorts' } },
+{ label: 'Videos', filters: { type: 'video' } },
+{ label: 'Recently uploaded', filters: { sort_by: 'date' } },
+{ label: 'Live', filters: { features: 'live' } },
 ];
 
 function renderChips(query, current, showShorts) {
@@ -131,46 +130,46 @@ function renderChips(query, current, showShorts) {
 
 function renderFilters(query, current) {
   return `
-    <div class="search-filters">
-      <div class="filter-group">
-        <label>Sort:</label>
-        <select class="filter-select" name="sort_by">
-          <option value="">Relevance</option>
-          <option value="date" ${current.sort_by === 'date' ? 'selected' : ''}>Date</option>
-          <option value="views" ${current.sort_by === 'views' ? 'selected' : ''}>Views</option>
-          <option value="rating" ${current.sort_by === 'rating' ? 'selected' : ''}>Rating</option>
-        </select>
-      </div>
-      <div class="filter-group">
-        <label>Type:</label>
-        <select class="filter-select" name="type">
-          <option value="">All</option>
-          <option value="video" ${current.type === 'video' ? 'selected' : ''}>Video</option>
-          <option value="channel" ${current.type === 'channel' ? 'selected' : ''}>Channel</option>
-          <option value="playlist" ${current.type === 'playlist' ? 'selected' : ''}>Playlist</option>
-        </select>
-      </div>
-      <div class="filter-group">
-        <label>Date:</label>
-        <select class="filter-select" name="date">
-          <option value="">Any time</option>
-          <option value="hour" ${current.date === 'hour' ? 'selected' : ''}>Last hour</option>
-          <option value="today" ${current.date === 'today' ? 'selected' : ''}>Today</option>
-          <option value="week" ${current.date === 'week' ? 'selected' : ''}>This week</option>
-          <option value="month" ${current.date === 'month' ? 'selected' : ''}>This month</option>
-          <option value="year" ${current.date === 'year' ? 'selected' : ''}>This year</option>
-        </select>
-      </div>
-      <div class="filter-group">
-        <label>Duration:</label>
-        <select class="filter-select" name="duration">
-          <option value="">Any</option>
-          <option value="short" ${current.duration === 'short' ? 'selected' : ''}>Short (&lt;4m)</option>
-          <option value="medium" ${current.duration === 'medium' ? 'selected' : ''}>Medium (4-20m)</option>
-          <option value="long" ${current.duration === 'long' ? 'selected' : ''}>Long (&gt;20m)</option>
-        </select>
-      </div>
-    </div>
+  <div class="search-filters">
+  <div class="filter-group">
+  <label>Sort:</label>
+  <select class="filter-select" name="sort_by">
+  <option value="">Relevance</option>
+  <option value="date" ${current.sort_by === 'date' ? 'selected' : ''}>Date</option>
+  <option value="views" ${current.sort_by === 'views' ? 'selected' : ''}>Views</option>
+  <option value="rating" ${current.sort_by === 'rating' ? 'selected' : ''}>Rating</option>
+  </select>
+  </div>
+  <div class="filter-group">
+  <label>Type:</label>
+  <select class="filter-select" name="type">
+  <option value="">All</option>
+  <option value="video" ${current.type === 'video' ? 'selected' : ''}>Video</option>
+  <option value="channel" ${current.type === 'channel' ? 'selected' : ''}>Channel</option>
+  <option value="playlist" ${current.type === 'playlist' ? 'selected' : ''}>Playlist</option>
+  </select>
+  </div>
+  <div class="filter-group">
+  <label>Date:</label>
+  <select class="filter-select" name="date">
+  <option value="">Any time</option>
+  <option value="hour" ${current.date === 'hour' ? 'selected' : ''}>Last hour</option>
+  <option value="today" ${current.date === 'today' ? 'selected' : ''}>Today</option>
+  <option value="week" ${current.date === 'week' ? 'selected' : ''}>This week</option>
+  <option value="month" ${current.date === 'month' ? 'selected' : ''}>This month</option>
+  <option value="year" ${current.date === 'year' ? 'selected' : ''}>This year</option>
+  </select>
+  </div>
+  <div class="filter-group">
+  <label>Duration:</label>
+  <select class="filter-select" name="duration">
+  <option value="">Any</option>
+  <option value="short" ${current.duration === 'short' ? 'selected' : ''}>Short (&lt;4m)</option>
+  <option value="medium" ${current.duration === 'medium' ? 'selected' : ''}>Medium (4-20m)</option>
+  <option value="long" ${current.duration === 'long' ? 'selected' : ''}>Long (&gt;20m)</option>
+  </select>
+  </div>
+  </div>
   `;
 }
 
@@ -184,33 +183,33 @@ function renderResult(item, isList = true) {
 
 function renderShortsShelf(shelf) {
   return `
-    <div class="shorts-shelf">
-      <h2 class="shorts-shelf-title">${escapeHtml(shelf.title)}</h2>
-      <div class="shorts-shelf-row">
-        ${shelf.items.map(s => `
-          <a href="#${s.url}" class="short-card">
-            <img src="${proxyImageUrl(s.thumbnailUrl || '')}" alt="" loading="lazy">
-            <div class="short-card-title">${escapeHtml(s.title || '')}</div>
-            <div class="short-card-views">${escapeHtml(s.views || '')}</div>
-          </a>
-        `).join('')}
-      </div>
+  <div class="shorts-shelf">
+  <h2 class="shorts-shelf-title">${escapeHtml(shelf.title)}</h2>
+  <div class="shorts-shelf-row">
+  ${shelf.items.map(s => `
+    <a href="#${s.url}" class="short-card">
+    <img src="${proxyImageUrl(s.thumbnailUrl || '')}" alt="" loading="lazy">
+    <div class="short-card-title">${escapeHtml(s.title || '')}</div>
+    <div class="short-card-views">${escapeHtml(s.views || '')}</div>
+    </a>
+    `).join('')}
     </div>
-  `;
+    </div>
+    `;
 }
 
 function renderChannelResult(ch) {
   const href = ch.id ? `/channel/${ch.id}` : '#';
   return `
-    <a href="#${href}" class="channel-card">
-      <div class="channel-card-avatar">
-        <img src="${proxyImageUrl(ch.iconUrl || '')}" alt="" loading="lazy">
-      </div>
-      <div>
-        <div class="channel-card-name">${escapeHtml(ch.name || '')}${verifiedBadge(ch.verified)}</div>
-        <div class="channel-card-meta">${[ch.subscribers, ch.videoCount].filter(Boolean).map(escapeHtml).join(' • ')}</div>
-      </div>
-    </a>
+  <a href="#${href}" class="channel-card">
+  <div class="channel-card-avatar">
+  <img src="${proxyImageUrl(ch.iconUrl || '')}" alt="" loading="lazy">
+  </div>
+  <div>
+  <div class="channel-card-name">${escapeHtml(ch.name || '')}${verifiedBadge(ch.verified)}</div>
+  <div class="channel-card-meta">${[ch.subscribers, ch.videoCount].filter(Boolean).map(escapeHtml).join(' • ')}</div>
+  </div>
+  </a>
   `;
 }
 
@@ -221,49 +220,49 @@ function renderPlaylistResult(pl, isList = true) {
   if (thumb.includes('/hqdefault.jpg')) thumb = thumb.replace('/hqdefault.jpg', '/mqdefault.jpg');
 
   const channelHref = pl.authorId
-    ? `#/channel/${encodeURIComponent(pl.authorId)}`
-    : (pl.authorUrl ? `#${pl.authorUrl.startsWith('/') ? pl.authorUrl : '/' + pl.authorUrl}` : '');
+  ? `#/channel/${encodeURIComponent(pl.authorId)}`
+  : (pl.authorUrl ? `#${pl.authorUrl.startsWith('/') ? pl.authorUrl : '/' + pl.authorUrl}` : '');
 
   const authorHtml = pl.author
-    ? (channelHref
-        ? `<a href="${channelHref}" class="video-card-author" onclick="event.stopPropagation();">${escapeHtml(pl.author)}</a>`
-        : `<span class="video-card-author">${escapeHtml(pl.author)}</span>`)
-    : '';
+  ? (channelHref
+  ? `<a href="${channelHref}" class="video-card-author" onclick="event.stopPropagation();">${escapeHtml(pl.author)}</a>`
+  : `<span class="video-card-author">${escapeHtml(pl.author)}</span>`)
+  : '';
 
   if (!isList) {
     return `
-      <div class="video-card" style="position:relative;">
-        <div class="video-card-link" onclick="if (!event.target.closest('a')) location.hash = '#${href}';" style="cursor:pointer;">
-          <a href="#${href}" class="video-card-thumb" style="display:block;" tabindex="-1">
-            <img src="${proxyImageUrl(thumb)}" alt="" loading="lazy">
-            <span class="video-card-duration">▶ ${escapeHtml(pl.videoCount || '')}</span>
-          </a>
-          <div class="video-card-info">
-            <a href="#${href}" class="video-card-title" style="display:block;text-decoration:none;">${escapeHtml(pl.title || '')}</a>
-            <div class="video-card-meta">
-              ${authorHtml}
-              <span class="video-card-stats">Playlist</span>
-            </div>
-          </div>
-        </div>
-      </div>
+    <div class="video-card" style="position:relative;">
+    <div class="video-card-link" onclick="if (!event.target.closest('a')) location.hash = '#${href}';" style="cursor:pointer;">
+    <a href="#${href}" class="video-card-thumb" style="display:block;" tabindex="-1">
+    <img src="${proxyImageUrl(thumb)}" alt="" loading="lazy">
+    <span class="video-card-duration">▶ ${escapeHtml(pl.videoCount || '')}</span>
+    </a>
+    <div class="video-card-info">
+    <a href="#${href}" class="video-card-title" style="display:block;text-decoration:none;">${escapeHtml(pl.title || '')}</a>
+    <div class="video-card-meta">
+    ${authorHtml}
+    <span class="video-card-stats">Playlist</span>
+    </div>
+    </div>
+    </div>
+    </div>
     `;
   }
   return `
-    <div class="video-list-entry" style="position:relative;">
-      <div class="video-list-item" onclick="if (!event.target.closest('a')) location.hash = '#${href}';" style="cursor:pointer;">
-        <a href="#${href}" class="video-list-thumb" tabindex="-1">
-          <img src="${proxyImageUrl(thumb)}" alt="" loading="lazy">
-          <span class="video-card-duration">▶ ${escapeHtml(pl.videoCount || '')}</span>
-        </a>
-        <div class="video-list-info">
-          <a href="#${href}" class="video-list-title" style="display:block;text-decoration:none;">${escapeHtml(pl.title || '')}</a>
-          <div class="video-list-meta">
-            ${authorHtml}
-            <span class="video-card-stats">Playlist</span>
-          </div>
-        </div>
-      </div>
-    </div>
+  <div class="video-list-entry" style="position:relative;">
+  <div class="video-list-item" onclick="if (!event.target.closest('a')) location.hash = '#${href}';" style="cursor:pointer;">
+  <a href="#${href}" class="video-list-thumb" tabindex="-1">
+  <img src="${proxyImageUrl(thumb)}" alt="" loading="lazy">
+  <span class="video-card-duration">▶ ${escapeHtml(pl.videoCount || '')}</span>
+  </a>
+  <div class="video-list-info">
+  <a href="#${href}" class="video-list-title" style="display:block;text-decoration:none;">${escapeHtml(pl.title || '')}</a>
+  <div class="video-list-meta">
+  ${authorHtml}
+  <span class="video-card-stats">Playlist</span>
+  </div>
+  </div>
+  </div>
+  </div>
   `;
 }
