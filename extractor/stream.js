@@ -41,8 +41,8 @@ function getSpecialClientRetry() {
 
 function pickBestAudio(audioStreams) {
   return audioStreams.find(s => s.isDefault)
-    || audioStreams.find(s => s.isOriginal)
-    || audioStreams[0] || null;
+  || audioStreams.find(s => s.isOriginal)
+  || audioStreams[0] || null;
 }
 
 function buildEmptyResult(videoId) {
@@ -90,8 +90,8 @@ async function getStreamUrlsViaYtdlp(videoId) {
 
   if (info.is_live) {
     const hls = (info.formats || [])
-      .filter(f => /m3u8/.test(f.protocol || '') && f.url)
-      .sort((a, b) => (b.acodec !== 'none' && b.vcodec !== 'none') - (a.acodec !== 'none' && a.vcodec !== 'none') || (b.height || 0) - (a.height || 0))[0];
+    .filter(f => /m3u8/.test(f.protocol || '') && f.url)
+    .sort((a, b) => (b.acodec !== 'none' && b.vcodec !== 'none') - (a.acodec !== 'none' && a.vcodec !== 'none') || (b.height || 0) - (a.height || 0))[0];
     if (!hls) throw new Error('yt-dlp returned no HLS format for the livestream');
     result.hlsManifestUrl = hls.url;
     return result;
@@ -110,8 +110,8 @@ async function getStreamUrlsViaYtdlp(videoId) {
     if (!hasAudio && !hasVideo) continue;
 
     const mimeType = format.ext === 'm4a' || (hasAudio && !hasVideo)
-      ? `audio/${format.audio_ext === 'm4a' || format.ext === 'm4a' ? 'mp4' : format.ext}; codecs="${format.acodec}"`
-      : `video/${format.ext}; codecs="${[format.vcodec, format.acodec].filter(c => c && c !== 'none').join(', ')}"`;
+    ? `audio/${format.audio_ext === 'm4a' || format.ext === 'm4a' ? 'mp4' : format.ext}; codecs="${format.acodec}"`
+    : `video/${format.ext}; codecs="${[format.vcodec, format.acodec].filter(c => c && c !== 'none').join(', ')}"`;
 
     const streamInfo = {
       url: format.url,
@@ -149,14 +149,14 @@ async function getStreamUrlsViaYtdlp(videoId) {
   result.videoStreams.sort((a, b) => (b.height || 0) - (a.height || 0));
   result.bestAudio = pickBestAudio(result.audioStreams);
   result.bestVideo = result.videoStreams.find(s => s.mimeType.includes('avc1'))
-    || result.videoStreams[0] || null;
+  || result.videoStreams[0] || null;
 
   result.qualityMap = {};
   const resolutions = [144, 240, 360, 480, 720, 1080, 1440, 2160];
   for (const stream of result.videoStreams) {
     if (stream.mimeType.includes('avc1')) {
       const closest = resolutions.reduce((prev, curr) =>
-        Math.abs(curr - stream.height) < Math.abs(prev - stream.height) ? curr : prev
+      Math.abs(curr - stream.height) < Math.abs(prev - stream.height) ? curr : prev
       );
       if (!result.qualityMap[closest] || stream.bitrate > result.qualityMap[closest].bitrate) {
         result.qualityMap[closest] = stream;
@@ -309,14 +309,14 @@ function parseInnertubeResult(data, videoId, usedClient, decipherFn = null, poTo
   result.bestAudio = pickBestAudio(result.audioStreams);
 
   result.bestVideo = result.videoStreams.find(s => s.mimeType.includes('avc1'))
-    || result.videoStreams[0] || null;
+  || result.videoStreams[0] || null;
 
   result.qualityMap = {};
   const resolutions = [144, 240, 360, 480, 720, 1080, 1440, 2160];
   for (const stream of result.videoStreams) {
     if (stream.mimeType.includes('avc1')) {
       const closest = resolutions.reduce((prev, curr) =>
-        Math.abs(curr - stream.height) < Math.abs(prev - stream.height) ? curr : prev
+      Math.abs(curr - stream.height) < Math.abs(prev - stream.height) ? curr : prev
       );
       if (!result.qualityMap[closest] || stream.bitrate > result.qualityMap[closest].bitrate) {
         result.qualityMap[closest] = stream;
@@ -429,7 +429,7 @@ function parseSabrResult(raw, videoId, client, poToken = '', decipherFn = null, 
   const resolutions = [144, 240, 360, 480, 720, 1080, 1440, 2160];
   for (const stream of result.videoStreams) {
     const closest = resolutions.reduce((prev, curr) =>
-      Math.abs(curr - stream.height) < Math.abs(prev - stream.height) ? curr : prev
+    Math.abs(curr - stream.height) < Math.abs(prev - stream.height) ? curr : prev
     );
     if (!result.qualityMap[closest] || stream.bitrate > result.qualityMap[closest].bitrate) {
       result.qualityMap[closest] = stream;
@@ -437,6 +437,25 @@ function parseSabrResult(raw, videoId, client, poToken = '', decipherFn = null, 
   }
 
   return result;
+}
+
+const MWEB_COMPAT_UA = 'Mozilla/5.0 (Linux; Android 16; Pixel Tablet Build/TP1A.220624.014; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/131.0.6778.39 Safari/537.36';
+let _mwebPageCache = null;
+async function getMwebPageInfo() {
+  if (_mwebPageCache && Date.now() - _mwebPageCache.t < 3600_000) return _mwebPageCache;
+  const info = { t: Date.now(), clientVersion: '', visitorData: '' };
+  try {
+    const { default: fetch } = await import('node-fetch');
+    const { getProxyAgent } = await import('./proxyManager.js');
+    const args = { headers: { 'User-Agent': MWEB_COMPAT_UA } };
+    const agent = getProxyAgent();
+    if (agent) args.agent = agent;
+    const html = await (await fetch('https://m.youtube.com/', args)).text();
+    info.clientVersion = (html.match(/"INNERTUBE_CLIENT_VERSION":\s*"([^"]+)"/) || [])[1] || '';
+    info.visitorData = (html.match(/"visitorData":\s*"([^"]+)"/) || [])[1] || '';
+  } catch {}
+  _mwebPageCache = info;
+  return info;
 }
 
 export async function extractJsClient(client, videoId, clientKey, trySabr) {
@@ -461,12 +480,22 @@ export async function extractJsClient(client, videoId, clientKey, trySabr) {
     }
   }
 
+  let mwebCompat = null;
+  if (targetKey === 'mweb') {
+    const pg = await getMwebPageInfo();
+    mwebCompat = {
+      clientVersion: pg.clientVersion || clientConfig.clientVersion,
+      visitorData: pg.visitorData || '',
+      userAgent: MWEB_COMPAT_UA,
+    };
+  }
+
   let cyn = null;
   try {
-    cyn = await mintCynTokens(videoId, client.visitorData || '', {
+    cyn = await mintCynTokens(videoId, (mwebCompat?.visitorData || client.visitorData || ''), {
       clientKey: isTvSimply ? 'tv_simply' : (isTv ? 'tv' : targetKey),
-      clientVersion: clientConfig.clientVersion,
-      userAgent
+                              clientVersion: mwebCompat?.clientVersion || clientConfig.clientVersion,
+                              userAgent: mwebCompat?.userAgent || userAgent
     });
   } catch {}
 
@@ -475,7 +504,7 @@ export async function extractJsClient(client, videoId, clientKey, trySabr) {
 
   let raw;
   if (targetKey === 'mweb') {
-    raw = await client.mwebPlayer(videoId, { sts: player.sts, poToken: playerPoToken });
+    raw = await client.mwebPlayer(videoId, { sts: player.sts, poToken: playerPoToken, mwebPlayerCompat: true, ...mwebCompat });
   } else if (targetKey === 'web') {
     raw = await client.webPlayer(videoId, { sts: player.sts, poToken: playerPoToken });
   } else if (isTvSimply) {
@@ -487,8 +516,22 @@ export async function extractJsClient(client, videoId, clientKey, trySabr) {
   const upcoming = parseUpcoming(raw, videoId, clientConfig.clientName);
   if (upcoming) return upcoming;
 
-  const streamPoToken = sabrPoToken || playerPoToken;
-  const decipherFn = (fmt, addPot = true) => decipherStream(targetKey, player.code, fmt, streamPoToken, targetKey, addPot);
+  const streamPoToken = targetKey === 'mweb' ? (playerPoToken || sabrPoToken) : (sabrPoToken || playerPoToken);
+  const decipherFn = (fmt, addPot = true) => {
+    let u = decipherStream(targetKey, player.code, fmt, streamPoToken, targetKey, addPot);
+    if (mwebCompat?.clientVersion && u) u = u.replace(/([?&]cver=)[^&]*/, `$1${mwebCompat.clientVersion}`);
+    return u;
+  };
+  if (process.env.VIVID_DEBUG_MWEB && targetKey === 'mweb') {
+    const f = (raw?.streamingData?.adaptiveFormats || [])[0];
+    let q = '';
+    try { q = new URL(f?.url || 'https://x/?').searchParams; } catch {}
+    console.error('[MWEB-DEBUG]', JSON.stringify({
+      compat: mwebCompat, playerPotLen: playerPoToken.length, sabrPotLen: sabrPoToken.length,
+      usedPotLen: streamPoToken.length, status: raw?.playabilityStatus?.status,
+      rawUrlHas: q ? { epbp: q.has('epbp'), pcm2: q.has('pcm2'), c: q.get('c'), sparams: q.get('sparams') } : null,
+    }));
+  }
 
   if (trySabr && !isTvSimply && raw?.streamingData?.serverAbrStreamingUrl && !raw?.videoDetails?.isLive) {
     const sabrResult = parseSabrResult(raw, videoId, client, sabrPoToken, decipherFn, clientConfig);
@@ -725,8 +768,8 @@ export async function getStreamUrls(client, videoId, options = {}) {
 
   const result = buildEmptyResult(videoId);
   result.error = `All extraction methods failed` +
-    (lastError ? ` (last error: ${lastError})` : '') +
-    `. Check whether your server's IP has been blocked by YouTube, or make sure Vivid is up to date: https://github.com/Youtube-Hackers/vivid`;
+  (lastError ? ` (last error: ${lastError})` : '') +
+  `. Check whether your server's IP has been blocked by YouTube, or make sure Vivid is up to date: https://github.com/Youtube-Hackers/vivid`;
   return result;
 }
 

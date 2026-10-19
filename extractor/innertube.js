@@ -58,7 +58,7 @@ class InnerTubeClient {
   async refreshClientVersions() {
     await Promise.allSettled([
       this.refreshWebVersion(),
-      this.refreshMwebVersion()
+                             this.refreshMwebVersion()
     ]);
   }
 
@@ -104,6 +104,18 @@ class InnerTubeClient {
   }
 
   _makeContext(client, originalUrl = null) {
+    if (client.minimalContext) {
+      const vd = client.visitorDataOverride || this.visitorData;
+      const c = {
+        clientName: client.clientName,
+        clientVersion: client.clientVersion,
+        hl: this.language,
+        gl: this.country,
+        utcOffsetMinutes: -new Date().getTimezoneOffset(),
+      };
+      if (vd) c.visitorData = vd;
+      return { client: c };
+    }
     const ctx = {
       client: {
         hl: this.language,
@@ -124,10 +136,10 @@ class InnerTubeClient {
     if (client.clientName === 'MWEB' || client.clientName === 'WEB') {
       Object.assign(ctx.client, {
         userAgent: `${client.userAgent},gzip(gfe)`,
-        originalUrl: originalUrl || `${client.origin}/`,
-        playerType: 'UNIPLAYER',
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        utcOffsetMinutes: -new Date().getTimezoneOffset(),
+                    originalUrl: originalUrl || `${client.origin}/`,
+                    playerType: 'UNIPLAYER',
+                    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                    utcOffsetMinutes: -new Date().getTimezoneOffset(),
       });
       if (client.clientFormFactor) ctx.client.clientFormFactor = client.clientFormFactor;
       if (client.browserName) ctx.client.browserName = client.browserName;
@@ -144,8 +156,8 @@ class InnerTubeClient {
     const headers = {
       'Content-Type': 'application/json',
       'Accept-Language': isBrowserClient
-        ? `${this.language}-${this.country},${this.language};q=0.9,en;q=0.7`
-        : `${this.language};q=0.9`,
+      ? `${this.language}-${this.country},${this.language};q=0.9,en;q=0.7`
+      : `${this.language};q=0.9`,
       'User-Agent': client.userAgent,
     };
 
@@ -193,8 +205,9 @@ class InnerTubeClient {
       headers['X-Youtube-Client-Version'] = client.clientVersion;
     }
 
-    if (this.visitorData) {
-      headers[client.clientName === 'MWEB' ? 'X-Goog-EOM-Visitor-Id' : 'X-Goog-Visitor-Id'] = this.visitorData;
+    const vdHeader = client.visitorDataOverride || this.visitorData;
+    if (vdHeader) {
+      headers[client.clientName === 'MWEB' && !client.minimalContext ? 'X-Goog-EOM-Visitor-Id' : 'X-Goog-Visitor-Id'] = vdHeader;
     }
 
     return headers;
@@ -219,7 +232,7 @@ class InnerTubeClient {
     }
 
     const result = await res.json();
-    
+
     const vd = result?.responseContext?.visitorData;
     if (vd) {
       this.visitorData = vd;
@@ -267,378 +280,387 @@ class InnerTubeClient {
         this.visitorData = visitorData;
       }
       return visitorData || null;
-    } catch (e) {
-      console.error('[InnerTube] Failed to fetch visitor data:', e.message);
-      return null;
-    }
+  } catch (e) {
+    console.error('[InnerTube] Failed to fetch visitor data:', e.message);
+    return null;
   }
+}
 
-  async search(query, params = null, continuation = null) {
-    const body = {
-      context: this._makeContext(WEB),
-      query,
+async search(query, params = null, continuation = null) {
+  const body = {
+    context: this._makeContext(WEB),
+    query,
+  };
+  if (params) body.params = params;
+  if (continuation) body.continuation = continuation;
+
+  return this._post(`${WEB.apiUrl}search?prettyPrint=false`, body, WEB);
+}
+
+async searchContinuation(continuationToken) {
+  const body = {
+    context: this._makeContext(WEB),
+    continuation: continuationToken,
+  };
+  return this._post(`${WEB.apiUrl}search?prettyPrint=false`, body, WEB);
+}
+
+async liveChat(continuation, { replay = false, offsetMs = 0 } = {}) {
+  const body = {
+    context: this._makeContext(WEB),
+    continuation,
+  };
+  if (replay) body.currentPlayerState = { playerOffsetMs: String(Math.max(0, Math.floor(offsetMs))) };
+  return this._post(getInnertubeApiUrl(replay ? 'live_chat/get_live_chat_replay' : 'live_chat/get_live_chat', WEB), body, WEB);
+}
+
+async browse(browseId, params = null, continuation = null, query = null) {
+  const body = {
+    context: this._makeContext(MWEB),
+  };
+  if (query) body.query = query;
+  if (browseId) body.browseId = browseId;
+  if (params) body.params = params;
+  if (continuation) body.continuation = continuation;
+
+  return this._post(getInnertubeApiUrl('browse'), body, MWEB);
+}
+async resolveUrl(url) {
+  const body = {
+    context: this._makeContext(MWEB),
+    url,
+  };
+  return this._post(getInnertubeApiUrl('navigation/resolve_url'), body, MWEB);
+}
+
+async browseAndroid(browseId, params = null, continuation = null) {
+  const body = {
+    context: this._makeContext(ANDROID),
+  };
+  if (browseId) body.browseId = browseId;
+  if (params) body.params = params;
+  if (continuation) body.continuation = continuation;
+
+  return this._post("https://youtubei.googleapis.com/youtubei/v1/browse", body, ANDROID);
+}
+async browseWeb(browseId, params = null, continuation = null, query = null) {
+  const body = {
+    context: this._makeContext(WEB),
+  };
+  if (query) body.query = query;
+  if (browseId) body.browseId = browseId;
+  if (params) body.params = params;
+  if (continuation) body.continuation = continuation;
+
+  return this._post(`${WEB.apiUrl}browse?prettyPrint=false`, body, WEB);
+}
+
+async next(videoId, playlistId = null) {
+  const body = {
+    context: this._makeContext(MWEB, `${MWEB.origin}/watch?v=${videoId}`),
+    videoId,
+  };
+  if (playlistId) body.playlistId = playlistId;
+
+  return this._post(getInnertubeApiUrl('next'), body, MWEB);
+}
+
+async nextContinuation(continuationToken, useWeb = false) {
+  const client = useWeb ? WEB : MWEB;
+  const body = {
+    context: this._makeContext(client),
+    continuation: continuationToken,
+  };
+  return this._post(useWeb ? `${WEB.apiUrl}next?prettyPrint=false` : getInnertubeApiUrl('next'), body, client);
+}
+
+async player(videoId, options = {}, client = MWEB) {
+  const opts = typeof options === 'boolean' ? { includePlaybackContext: options } : (options || {});
+  let targetClient = opts.client || client || MWEB;
+  if (opts.mwebPlayerCompat && targetClient.clientName === 'MWEB') {
+    targetClient = {
+      ...targetClient,
+      clientVersion: opts.clientVersion || targetClient.clientVersion,
+      userAgent: opts.userAgent || targetClient.userAgent,
+      visitorDataOverride: opts.visitorData || undefined,
+      minimalContext: true,
     };
-    if (params) body.params = params;
-    if (continuation) body.continuation = continuation;
-
-    return this._post(`${WEB.apiUrl}search?prettyPrint=false`, body, WEB);
   }
 
-  async searchContinuation(continuationToken) {
-    const body = {
-      context: this._makeContext(WEB),
-      continuation: continuationToken,
-    };
-    return this._post(`${WEB.apiUrl}search?prettyPrint=false`, body, WEB);
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  let cpn = opts.cpn;
+  if (!cpn) {
+    cpn = '';
+    for (let i = 0; i < 16; i++) cpn += chars.charAt(Math.floor(Math.random() * chars.length));
   }
 
-  async liveChat(continuation, { replay = false, offsetMs = 0 } = {}) {
-    const body = {
-      context: this._makeContext(WEB),
-      continuation,
-    };
-    if (replay) body.currentPlayerState = { playerOffsetMs: String(Math.max(0, Math.floor(offsetMs))) };
-    return this._post(getInnertubeApiUrl(replay ? 'live_chat/get_live_chat_replay' : 'live_chat/get_live_chat', WEB), body, WEB);
-  }
+  const body = {
+    context: this._makeContext(targetClient, targetClient.origin ? `${targetClient.origin}/watch?v=${videoId}` : null),
+    videoId,
+    contentCheckOk: true,
+    racyCheckOk: true,
+    cpn,
+  };
 
-  async browse(browseId, params = null, continuation = null, query = null) {
-    const body = {
-      context: this._makeContext(MWEB),
-    };
-    if (query) body.query = query;
-    if (browseId) body.browseId = browseId;
-    if (params) body.params = params;
-    if (continuation) body.continuation = continuation;
-
-    return this._post(getInnertubeApiUrl('browse'), body, MWEB);
-  }
-  async resolveUrl(url) {
-    const body = {
-      context: this._makeContext(MWEB),
-      url,
-    };
-    return this._post(getInnertubeApiUrl('navigation/resolve_url'), body, MWEB);
-  }
-
-  async browseAndroid(browseId, params = null, continuation = null) {
-    const body = {
-      context: this._makeContext(ANDROID),
-    };
-    if (browseId) body.browseId = browseId;
-    if (params) body.params = params;
-    if (continuation) body.continuation = continuation;
-
-    return this._post("https://youtubei.googleapis.com/youtubei/v1/browse", body, ANDROID);
-  }
-  async browseWeb(browseId, params = null, continuation = null, query = null) {
-    const body = {
-      context: this._makeContext(WEB),
-    };
-    if (query) body.query = query;
-    if (browseId) body.browseId = browseId;
-    if (params) body.params = params;
-    if (continuation) body.continuation = continuation;
-
-    return this._post(`${WEB.apiUrl}browse?prettyPrint=false`, body, WEB);
-  }
-
-  async next(videoId, playlistId = null) {
-    const body = {
-      context: this._makeContext(MWEB, `${MWEB.origin}/watch?v=${videoId}`),
-      videoId,
-    };
-    if (playlistId) body.playlistId = playlistId;
-
-    return this._post(getInnertubeApiUrl('next'), body, MWEB);
-  }
-
-  async nextContinuation(continuationToken, useWeb = false) {
-    const client = useWeb ? WEB : MWEB;
-    const body = {
-      context: this._makeContext(client),
-      continuation: continuationToken,
-    };
-    return this._post(useWeb ? `${WEB.apiUrl}next?prettyPrint=false` : getInnertubeApiUrl('next'), body, client);
-  }
-
-  async player(videoId, options = {}, client = MWEB) {
-    const opts = typeof options === 'boolean' ? { includePlaybackContext: options } : (options || {});
-    const targetClient = opts.client || client || MWEB;
-
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-    let cpn = opts.cpn;
-    if (!cpn) {
-      cpn = '';
-      for (let i = 0; i < 16; i++) cpn += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-
-    const body = {
-      context: this._makeContext(targetClient, targetClient.origin ? `${targetClient.origin}/watch?v=${videoId}` : null),
-      videoId,
-      contentCheckOk: true,
-      racyCheckOk: true,
-      cpn,
-    };
-
-    if (opts.includePlaybackContext !== false) {
-      const sts = opts.sts !== undefined ? opts.sts : (opts.signatureTimestamp || 0);
-      body.playbackContext = {
-        contentPlaybackContext: {
-          currentUrl: `/watch?v=${videoId}`,
-          signatureTimestamp: Number(sts) || 0,
-          html5Preference: 'HTML5_PREF_WANTS',
-        }
-      };
-    }
-
-    const poToken = opts.poToken || opts.cynToken;
-    if (poToken) {
-      body.serviceIntegrityDimensions = {
-        poToken: String(poToken)
-      };
-    }
-
-    const url = (targetClient.origin ? targetClient.origin : (targetClient.apiUrl === MOBILE_API_URL ? 'https://m.youtube.com' : 'https://www.youtube.com')) + '/youtubei/v1/player?prettyPrint=false';
-    const res = await this._post(url, body, targetClient);
-    if (res && typeof res === 'object') {
-      res.cpn = cpn;
-    }
-    return res;
-  }
-
-  async mwebPlayer(videoId, options = {}) {
-    return this.player(videoId, options, MWEB);
-  }
-
-  async webPlayer(videoId, options = {}) {
-    let raw = null;
-    try {
-      raw = await this.player(videoId, options, WEB);
-    } catch {}
-    if (raw && raw.playabilityStatus?.status === 'OK' && raw.streamingData) {
-      return raw;
-    }
-    try {
-      const hdrs = {
-        'User-Agent': WEB.userAgent,
-        'Accept-Language': `${this.language};q=0.9,en-US;q=0.8,en;q=0.7`,
-      };
-      const cookieHeader = getCookieHeader();
-      if (cookieHeader) hdrs['Cookie'] = cookieHeader;
-      const fetchArgs = { headers: hdrs };
-      const agent = getProxyAgent();
-      if (agent) fetchArgs.agent = agent;
-      const pageRes = await fetch(`https://www.youtube.com/watch?v=${videoId}&bpctr=9999999999&has_verified=1`, fetchArgs);
-      if (pageRes.ok) {
-        const html = await pageRes.text();
-        const m = html.match(/ytInitialPlayerResponse\s*=\s*({.+?});(?:var\s|const\s|let\s|<\/script>)/s);
-        if (m) {
-          const parsed = JSON.parse(m[1]);
-          if (parsed && typeof parsed === 'object') {
-            return parsed;
-          }
-        }
+  if (opts.includePlaybackContext !== false) {
+    const sts = opts.sts !== undefined ? opts.sts : (opts.signatureTimestamp || 0);
+    body.playbackContext = {
+      contentPlaybackContext: {
+        currentUrl: `/watch?v=${videoId}`,
+        signatureTimestamp: Number(sts) || 0,
+        html5Preference: 'HTML5_PREF_WANTS',
       }
-    } catch {}
+    };
+  }
+
+  const poToken = opts.poToken || opts.cynToken;
+  if (poToken) {
+    body.serviceIntegrityDimensions = {
+      poToken: String(poToken)
+    };
+  }
+
+  const url = (targetClient.origin ? targetClient.origin : (targetClient.apiUrl === MOBILE_API_URL ? 'https://m.youtube.com' : 'https://www.youtube.com')) + '/youtubei/v1/player?prettyPrint=false';
+  const res = await this._post(url, body, targetClient);
+  if (res && typeof res === 'object') {
+    res.cpn = cpn;
+  }
+  return res;
+}
+
+async mwebPlayer(videoId, options = {}) {
+  return this.player(videoId, options, MWEB);
+}
+
+async webPlayer(videoId, options = {}) {
+  let raw = null;
+  try {
+    raw = await this.player(videoId, options, WEB);
+  } catch {}
+  if (raw && raw.playabilityStatus?.status === 'OK' && raw.streamingData) {
     return raw;
   }
-
-  async fetchTvVisitorData() {
-    try {
-      const origin = 'https://www.youtube.com';
-      const hdrs = {
-        'User-Agent': TVHTML5.userAgent,
-        'Accept-Language': 'en-US,en;q=0.9'
-      };
-      const cookieHeader = getCookieHeader();
-      if (cookieHeader) {
-        hdrs['Cookie'] = cookieHeader;
-        const auth = getAuthHeader(origin);
-        if (auth) {
-          hdrs['Authorization'] = auth;
-          hdrs['X-Origin'] = origin;
-          hdrs['X-Goog-AuthUser'] = '0';
-          hdrs['X-Youtube-Bootstrap-Logged-In'] = 'true';
+  try {
+    const hdrs = {
+      'User-Agent': WEB.userAgent,
+      'Accept-Language': `${this.language};q=0.9,en-US;q=0.8,en;q=0.7`,
+    };
+    const cookieHeader = getCookieHeader();
+    if (cookieHeader) hdrs['Cookie'] = cookieHeader;
+    const fetchArgs = { headers: hdrs };
+    const agent = getProxyAgent();
+    if (agent) fetchArgs.agent = agent;
+    const pageRes = await fetch(`https://www.youtube.com/watch?v=${videoId}&bpctr=9999999999&has_verified=1`, fetchArgs);
+    if (pageRes.ok) {
+      const html = await pageRes.text();
+      const m = html.match(/ytInitialPlayerResponse\s*=\s*({.+?});(?:var\s|const\s|let\s|<\/script>)/s);
+      if (m) {
+        const parsed = JSON.parse(m[1]);
+        if (parsed && typeof parsed === 'object') {
+          return parsed;
         }
       }
-      const fetchArgs = { headers: hdrs };
-      const agent = getProxyAgent();
-      if (agent) fetchArgs.agent = agent;
-      const tvPageRes = await fetch('https://www.youtube.com/tv', fetchArgs);
-      const html = await tvPageRes.text();
-      const m = html.match(/"visitorData":\s*"([^"]+)"/);
-      if (m) this.visitorData = m[1];
-      const syncM = html.match(/"DATASYNC_ID":\s*"([^"]+)"/);
-      if (syncM) {
-        const parts = syncM[1].split('||');
-        this.userSessionId = parts[1] || parts[0];
+    }
+  } catch {}
+  return raw;
+}
+
+async fetchTvVisitorData() {
+  try {
+    const origin = 'https://www.youtube.com';
+    const hdrs = {
+      'User-Agent': TVHTML5.userAgent,
+      'Accept-Language': 'en-US,en;q=0.9'
+    };
+    const cookieHeader = getCookieHeader();
+    if (cookieHeader) {
+      hdrs['Cookie'] = cookieHeader;
+      const auth = getAuthHeader(origin);
+      if (auth) {
+        hdrs['Authorization'] = auth;
+        hdrs['X-Origin'] = origin;
+        hdrs['X-Goog-AuthUser'] = '0';
+        hdrs['X-Youtube-Bootstrap-Logged-In'] = 'true';
       }
-      return this.visitorData || null;
-    } catch {
-      return null;
     }
-  }
-
-  async tvPlayer(videoId, options = {}) {
-    if (!this.visitorData) {
-      await this.fetchTvVisitorData();
-    }
-    return this.player(videoId, options, TVHTML5);
-  }
-
-  async tvSimplyPlayer(videoId, options = {}) {
-    if (!this.visitorData) {
-      await this.fetchTvVisitorData();
-    }
-    return this.player(videoId, options, TVHTML5_SIMPLY);
-  }
-
-  async visionOsPlayer(videoId) {
-    const client = VISIONOS;
-
-    if (!this.visitorData) {
-      await this.fetchVisitorData();
-    }
-
-    const ctx = this._makeContext(client);
-    ctx.client.originalUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    ctx.request = { useSsl: true };
-    ctx.user = { enableSafetyMode: false, lockedSafetyMode: false };
-
-    const body = {
-      videoId,
-      context: ctx,
-      contentCheckOk: true,
-      racyCheckOk: true,
-      playbackContext: {
-        contentPlaybackContext: {
-          html5Preference: 'HTML5_PREF_WANTS',
-        },
-      },
-    };
-
-    const url = `https://www.youtube.com/youtubei/v1/player`;
-    return this._post(url, body, client);
-  }
-
-  async reelPlayer(videoId) {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-    let cpn = '';
-    for (let i = 0; i < 16; i++) cpn += chars.charAt(Math.floor(Math.random() * chars.length));
-
-    if (!this.visitorData) {
-      await this.fetchVisitorData();
-    }
-
-    const body = {
-      context: this._makeContext(ANDROID_REEL),
-      playerRequest: {
-        videoId,
-        contentCheckOk: true,
-        racyCheckOk: true,
-      },
-      disablePlayerResponse: false,
-      cpn,
-    };
-
-    const endpoint = 'reel/reel_item_watch?fields=playerResponse.streamingData,playerResponse.playabilityStatus';
-    const url = `${API_URL}${endpoint}&prettyPrint=false`;
-
-    const result = await this._post(url, body, ANDROID_REEL);
-    return { ...(result.playerResponse || result), cpn };
-  }
-
-  async getCommentsLegacy(continuationToken) {
-    const url = `https://m.youtube.com/watch_comment?action_get_comments=1&pbj=1&ctoken=${encodeURIComponent(continuationToken)}`;
-    const res = await this._get(url, {
-      'X-YouTube-Client-Version': '2.20210714.00.00',
-      'X-YouTube-Client-Name': '2',
-    });
-    return res.json();
-  }
-
-  async getPage(url) {
-    const res = await this._get(url);
-    return res.text();
-  }
-
-  async getDesktopPage(url) {
-    const fetchArgs = {
-      headers: {
-        'User-Agent': WEB.userAgent,
-        'Accept-Language': `${this.language};q=0.9`,
-        'Cookie': 'SOCS=CAI; CONSENT=YES+1',
-      },
-    };
+    const fetchArgs = { headers: hdrs };
     const agent = getProxyAgent();
     if (agent) fetchArgs.agent = agent;
-    const res = await fetchWith403Retry(url, fetchArgs);
-    if (!res.ok) throw new Error(`GET ${url}: ${res.status}`);
-    return res.text();
+    const tvPageRes = await fetch('https://www.youtube.com/tv', fetchArgs);
+    const html = await tvPageRes.text();
+    const m = html.match(/"visitorData":\s*"([^"]+)"/);
+    if (m) this.visitorData = m[1];
+    const syncM = html.match(/"DATASYNC_ID":\s*"([^"]+)"/);
+    if (syncM) {
+      const parts = syncM[1].split('||');
+      this.userSessionId = parts[1] || parts[0];
+    }
+    return this.visitorData || null;
+  } catch {
+    return null;
+  }
+}
+
+async tvPlayer(videoId, options = {}) {
+  if (!this.visitorData) {
+    await this.fetchTvVisitorData();
+  }
+  return this.player(videoId, options, TVHTML5);
+}
+
+async tvSimplyPlayer(videoId, options = {}) {
+  if (!this.visitorData) {
+    await this.fetchTvVisitorData();
+  }
+  return this.player(videoId, options, TVHTML5_SIMPLY);
+}
+
+async visionOsPlayer(videoId) {
+  const client = VISIONOS;
+
+  if (!this.visitorData) {
+    await this.fetchVisitorData();
   }
 
-  async androidVrPlayer(videoId) {
-    const authHeader = await getVrAuthorization();
-    if (!authHeader) {
-      throw new Error('SABR is not configured on this server');
-    }
+  const ctx = this._makeContext(client);
+  ctx.client.originalUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  ctx.request = { useSsl: true };
+  ctx.user = { enableSafetyMode: false, lockedSafetyMode: false };
 
-    if (!this.visitorData) {
-      await this.fetchVisitorData();
-    }
+  const body = {
+    videoId,
+    context: ctx,
+    contentCheckOk: true,
+    racyCheckOk: true,
+    playbackContext: {
+      contentPlaybackContext: {
+        html5Preference: 'HTML5_PREF_WANTS',
+      },
+    },
+  };
 
-    const ctx = {
-      client: {
-        deviceMake: ANDROID_VR.deviceMake,
-        deviceModel: ANDROID_VR.deviceModel,
-        clientName: ANDROID_VR.clientName,
-        clientVersion: ANDROID_VR.clientVersion,
-        osName: ANDROID_VR.osName,
-        osVersion: ANDROID_VR.osVersion,
-        androidSdkVersion: Number(ANDROID_VR.androidSdkVersion),
-        hl: this.language,
-        gl: this.country,
-      }
-    };
-    if (this.visitorData) ctx.client.visitorData = this.visitorData;
+  const url = `https://www.youtube.com/youtubei/v1/player`;
+  return this._post(url, body, client);
+}
 
-    const body = {
-      context: ctx,
+async reelPlayer(videoId) {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  let cpn = '';
+  for (let i = 0; i < 16; i++) cpn += chars.charAt(Math.floor(Math.random() * chars.length));
+
+  if (!this.visitorData) {
+    await this.fetchVisitorData();
+  }
+
+  const body = {
+    context: this._makeContext(ANDROID_REEL),
+    playerRequest: {
       videoId,
       contentCheckOk: true,
       racyCheckOk: true,
-    };
+    },
+    disablePlayerResponse: false,
+    cpn,
+  };
 
-    const headers = {
-      'Content-Type': 'application/json',
-      'User-Agent': ANDROID_VR.userAgent,
-      'X-YouTube-Client-Name': ANDROID_VR.clientId,
-      'X-YouTube-Client-Version': ANDROID_VR.clientVersion,
-      'X-Goog-Api-Format-Version': '2',
-      'Authorization': authHeader,
-    };
-    if (this.visitorData) headers['X-Goog-Visitor-Id'] = this.visitorData;
+  const endpoint = 'reel/reel_item_watch?fields=playerResponse.streamingData,playerResponse.playabilityStatus';
+  const url = `${API_URL}${endpoint}&prettyPrint=false`;
 
-    const url = 'https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false';
-    const fetchArgs = {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    };
-    const agent = getProxyAgent();
-    if (agent) fetchArgs.agent = agent;
+  const result = await this._post(url, body, ANDROID_REEL);
+  return { ...(result.playerResponse || result), cpn };
+}
 
-    const res = await fetchWith403Retry(url, fetchArgs);
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`InnerTube SABR player ${res.status}: ${text.substring(0, 200)}`);
-    }
+async getCommentsLegacy(continuationToken) {
+  const url = `https://m.youtube.com/watch_comment?action_get_comments=1&pbj=1&ctoken=${encodeURIComponent(continuationToken)}`;
+  const res = await this._get(url, {
+    'X-YouTube-Client-Version': '2.20210714.00.00',
+    'X-YouTube-Client-Name': '2',
+  });
+  return res.json();
+}
 
-    const result = await res.json();
-    const vd = result?.responseContext?.visitorData;
-    if (vd) this.visitorData = vd;
-    return result;
+async getPage(url) {
+  const res = await this._get(url);
+  return res.text();
+}
+
+async getDesktopPage(url) {
+  const fetchArgs = {
+    headers: {
+      'User-Agent': WEB.userAgent,
+      'Accept-Language': `${this.language};q=0.9`,
+      'Cookie': 'SOCS=CAI; CONSENT=YES+1',
+    },
+  };
+  const agent = getProxyAgent();
+  if (agent) fetchArgs.agent = agent;
+  const res = await fetchWith403Retry(url, fetchArgs);
+  if (!res.ok) throw new Error(`GET ${url}: ${res.status}`);
+  return res.text();
+}
+
+async androidVrPlayer(videoId) {
+  const authHeader = await getVrAuthorization();
+  if (!authHeader) {
+    throw new Error('SABR is not configured on this server');
   }
+
+  if (!this.visitorData) {
+    await this.fetchVisitorData();
+  }
+
+  const ctx = {
+    client: {
+      deviceMake: ANDROID_VR.deviceMake,
+      deviceModel: ANDROID_VR.deviceModel,
+      clientName: ANDROID_VR.clientName,
+      clientVersion: ANDROID_VR.clientVersion,
+      osName: ANDROID_VR.osName,
+      osVersion: ANDROID_VR.osVersion,
+      androidSdkVersion: Number(ANDROID_VR.androidSdkVersion),
+      hl: this.language,
+      gl: this.country,
+    }
+  };
+  if (this.visitorData) ctx.client.visitorData = this.visitorData;
+
+  const body = {
+    context: ctx,
+    videoId,
+    contentCheckOk: true,
+    racyCheckOk: true,
+  };
+
+  const headers = {
+    'Content-Type': 'application/json',
+    'User-Agent': ANDROID_VR.userAgent,
+    'X-YouTube-Client-Name': ANDROID_VR.clientId,
+    'X-YouTube-Client-Version': ANDROID_VR.clientVersion,
+    'X-Goog-Api-Format-Version': '2',
+    'Authorization': authHeader,
+  };
+  if (this.visitorData) headers['X-Goog-Visitor-Id'] = this.visitorData;
+
+  const url = 'https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false';
+  const fetchArgs = {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  };
+  const agent = getProxyAgent();
+  if (agent) fetchArgs.agent = agent;
+
+  const res = await fetchWith403Retry(url, fetchArgs);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`InnerTube SABR player ${res.status}: ${text.substring(0, 200)}`);
+  }
+
+  const result = await res.json();
+  const vd = result?.responseContext?.visitorData;
+  if (vd) this.visitorData = vd;
+  return result;
+}
 }
 
 export default InnerTubeClient;
