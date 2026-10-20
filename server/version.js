@@ -24,7 +24,7 @@ import { dirname, join } from 'path';
 import fetch from 'node-fetch';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const REPO = 'Youtube-Hackers/vivid';
+const REPO = 'TeamVivid/Vivid';
 
 const git = (...args) => {
   try {

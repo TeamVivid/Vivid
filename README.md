@@ -17,7 +17,7 @@ A privacy focused alternative YouTube frontend inspired by Invidious and Nitter
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/Youtube-Hackers/vivid.git
+   git clone https://github.com/TeamVivid/Vivid.git
    cd vivid
    ```
 

@@ -769,7 +769,7 @@ export async function getStreamUrls(client, videoId, options = {}) {
   const result = buildEmptyResult(videoId);
   result.error = `All extraction methods failed` +
   (lastError ? ` (last error: ${lastError})` : '') +
-  `. Check whether your server's IP has been blocked by YouTube, or make sure Vivid is up to date: https://github.com/Youtube-Hackers/vivid`;
+  `. Check whether your server's IP has been blocked by YouTube, or make sure Vivid is up to date: https://github.com/TeamVivid/Vivid`;
   return result;
 }
 

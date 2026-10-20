@@ -85,7 +85,7 @@ app.get('/api/v1', (req, res) => {
     version,
     behind: status.behind,
     privacyPolicyUrl: PRIVACY_POLICY_URL,
-    website: 'https://github.com/Youtube-Hackers/vivid'
+    website: 'https://github.com/TeamVivid/Vivid'
   });
 });
 
