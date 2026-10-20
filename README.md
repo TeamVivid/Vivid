@@ -2,9 +2,7 @@
 
 A privacy focused alternative YouTube frontend inspired by Invidious and Nitter
 
-## Instances
-
-- [Official Public Instance](https://vivid.errexe.xyz/) ([Privacy Policy](https://i.errexe.xyz/vivid/public-privacy-v1.html))
+Click [here](https://github.com/TeamVivid/instances/blob/main/INSTANCES.md) for a list of public instances
 
 ## Self Hosting
 
