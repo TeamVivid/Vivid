@@ -19,6 +19,20 @@
 
 const STORAGE_KEY = 'vivid_playlists';
 
+function formatDuration(duration) {
+  if (duration === null || duration === undefined || duration === '') return '';
+  if (typeof duration === 'number' && Number.isFinite(duration)) {
+    const total = Math.max(0, Math.round(duration));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    const mm = h > 0 ? String(m).padStart(2, '0') : String(m);
+    const ss = String(s).padStart(2, '0');
+    return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+  }
+  return String(duration);
+}
+
 export function getPlaylists() {
   const data = localStorage.getItem(STORAGE_KEY);
   return data ? JSON.parse(data) : [];
@@ -74,9 +88,9 @@ export function importYoutubePlaylist(name, videos) {
     authorUrl: v.authorUrl || '',
     views: v.views || '',
     publishDate: v.publishDate || '',
-    duration: v.duration || '',
-    thumbnailUrl: v.thumbnailUrl || '',
-    addedAt: new Date().toISOString(),
+    duration: formatDuration(v.duration),
+                                                   thumbnailUrl: v.thumbnailUrl || '',
+                                                   addedAt: new Date().toISOString(),
   }));
 
   playlists.push({
@@ -104,9 +118,9 @@ export function addVideoToPlaylist(playlistId, video) {
         authorUrl: video.authorUrl || '',
         views: video.views || '',
         publishDate: video.publishDate || '',
-        duration: video.duration || '',
-        thumbnailUrl: video.thumbnailUrl || '',
-        addedAt: new Date().toISOString(),
+        duration: formatDuration(video.duration),
+                           thumbnailUrl: video.thumbnailUrl || '',
+                           addedAt: new Date().toISOString(),
       });
       savePlaylists(playlists);
     }
