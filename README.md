@@ -1,4 +1,4 @@
-# Vivid
+![Vivid Logo](https://github.com/TeamVivid/.github/blob/main/vivid-logo-transparent-smaller.png?raw=true)
 
 A privacy focused alternative YouTube frontend inspired by Invidious and Nitter
 
