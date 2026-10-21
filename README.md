@@ -18,7 +18,7 @@ Click [here](https://github.com/TeamVivid/instances/blob/main/INSTANCES.md) for 
 1. Clone the repository:
    ```bash
    git clone https://github.com/TeamVivid/Vivid.git
-   cd vivid
+   cd Vivid
    ```
 
 2. Install dependencies:
