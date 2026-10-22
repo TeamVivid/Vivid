@@ -935,6 +935,13 @@ button { cursor: pointer; font-family: inherit; }
   justify-content: center;
   cursor: pointer;
 }
+
+@media (max-width: 640px) {
+  .vjs-theatre-btn {
+    display: none !important;
+  }
+}
+
 .autoplay-countdown {
   font-size: 1.6rem;
   position: absolute;
