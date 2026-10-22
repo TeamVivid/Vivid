@@ -20,6 +20,7 @@ import { getTextFromObject, getAttributedText, parseSuccinctVideo, parseSuccinct
   getThumbnailUrlClosest, getVideoThumbnailUrl, getVideoIdByUrl, getPlaylistIdByUrl,
   convertUrlToMobile, hasVerifiedBadge, parseQueryParams, getVideoIdFromThumbnailUrl, formatCount, formatWithCommas } from './utils.js';
 import fetch from 'node-fetch';
+import https from 'node:https';
 import { parseStoryboards } from './storyboards.js';
 import { WEB } from './constants.js';
 
@@ -33,11 +34,22 @@ import { WEB } from './constants.js';
     return null;
   }
 
+  const rydAgent = new https.Agent({ family: 4, keepAlive: true });
+  const rydCache = new Map();
+
   async function fetchLikeDislikeCounts(videoId) {
+    const hit = rydCache.get(videoId);
+    if (hit && Date.now() - hit.t < 10 * 60 * 1000) return hit.v;
+    const v = await fetchLikeDislikeCounts0(videoId);
+    if (v.dislikes !== 'N/A') rydCache.set(videoId, { t: Date.now(), v });
+    return v;
+  }
+
+  async function fetchLikeDislikeCounts0(videoId) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
-      const res = await fetch(`https://returnyoutubedislikeapi.com/votes?videoId=${videoId}`, { signal: controller.signal });
+      const timeout = setTimeout(() => controller.abort(), 4000);
+      const res = await fetch(`https://returnyoutubedislikeapi.com/votes?videoId=${videoId}`, { signal: controller.signal, agent: rydAgent });
       clearTimeout(timeout);
       if (!res.ok) return { dislikes: 'N/A', dislikesExact: 0, rating: 0 };
       const data = await res.json();
@@ -242,6 +254,9 @@ import { WEB } from './constants.js';
       thumbnailUrl: getVideoThumbnailUrl(videoId),
       isLivestream: false,
       isUpcoming: false,
+      license: '',
+      category: '',
+      visibility: '',
       suggestions: [],
       descriptionSections: [],
       suggestionsContinuationToken: '',
@@ -256,18 +271,20 @@ import { WEB } from './constants.js';
     };
 
     try {
+      const rydPromise = fetchLikeDislikeCounts(videoId);
       const promises = [
         client.next(videoId, playlistId),
         client._post(`${WEB.apiUrl}next?prettyPrint=false`, {
           context: client._makeContext(WEB),
           videoId,
           ...(playlistId ? { playlistId } : {})
-        }, WEB).catch(() => null)
+        }, WEB).catch(() => null),
+        client.mwebBasePlayer(videoId).catch(() => null)
       ];
       if (playlistId) {
         promises.push(getPlaylist(client, playlistId).catch(() => null));
       }
-      const [nextData, webNextData, plData] = await Promise.all(promises);
+      const [nextData, webNextData, playerData, plData] = await Promise.all(promises);
       result.storyboards = parseStoryboards(nextData.playerResponse?.storyboards || nextData.storyboards);
       const watchNext = nextData?.contents?.singleColumnWatchNextResults;
 
@@ -415,6 +432,16 @@ import { WEB } from './constants.js';
         }
       }
 
+      const micro = playerData?.microformat?.playerMicroformatRenderer || findKey(nextData, 'playerMicroformatRenderer') || findKey(webNextData, 'playerMicroformatRenderer');
+      const metaRows = (findKey(webNextData, 'metadataRowContainerRenderer') || findKey(nextData, 'metadataRowContainerRenderer'))?.rows || [];
+      const metaRow = (re) => {
+        const row = metaRows.map(r => r.metadataRowRenderer).find(r => re.test(getTextFromObject(r?.title)));
+        return row ? getTextFromObject(row.contents?.[0]) : '';
+      };
+      result.category = micro?.category || metaRow(/categor/i);
+      result.license = metaRow(/licen[cs]e/i) || 'Standard YouTube License';
+      result.visibility = (playerData?.videoDetails || findKey(nextData, 'videoDetails'))?.isPrivate ? 'Private' : micro?.isUnlisted ? 'Unlisted' : 'Public';
+
       const chat = findKey(webNextData, 'liveChatRenderer') || findKey(nextData, 'liveChatRenderer');
       const chatToken = chat?.continuations?.[0]?.reloadContinuationData?.continuation
         || chat?.continuations?.[0]?.invalidationContinuationData?.continuation
@@ -519,7 +546,7 @@ import { WEB } from './constants.js';
       if (itLikes.likes) result.likes = itLikes.likes;
       if (itLikes.likesExact) result.likesExact = itLikes.likesExact;
 
-      const rydData = await fetchLikeDislikeCounts(videoId);
+      const rydData = await rydPromise;
       result.dislikes = rydData.dislikes;
       result.dislikesExact = rydData.dislikesExact;
       result.rating = rydData.rating;

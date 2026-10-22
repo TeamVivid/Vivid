@@ -1,7 +1,10 @@
 import fetch from 'node-fetch';
-import { getCachedItem, setCachedItem } from '../storage.js';
 import { getProxyAgent } from '../proxyManager.js';
 import { decipherStream, getSignatureTimestamp } from './decipher.js';
+
+const PLAYER_TTL = 12 * 60 * 60 * 1000;
+const playerCache = new Map();
+const inflight = new Map();
 
 const CLIENT_PAGES = {
   mweb: {
@@ -54,11 +57,16 @@ export async function discoverPlayerJsPath(clientKey = 'mweb', userAgent = null)
 
 export async function getPlayerCode(clientKey = 'mweb', userAgent = null) {
   const cacheKey = `player_code_${clientKey}`;
-  const cached = await getCachedItem(cacheKey);
-  if (cached && cached.code) {
-    return cached;
-  }
+  const cached = playerCache.get(cacheKey);
+  if (cached && cached.expires > Date.now()) return cached.result;
 
+  if (!inflight.has(cacheKey)) {
+    inflight.set(cacheKey, loadPlayerCode(clientKey, userAgent, cacheKey).finally(() => inflight.delete(cacheKey)));
+  }
+  return inflight.get(cacheKey);
+}
+
+async function loadPlayerCode(clientKey, userAgent, cacheKey) {
   const jsPath = await discoverPlayerJsPath(clientKey, userAgent);
   const fullUrl = jsPath.startsWith('http') ? jsPath : `https://www.youtube.com${jsPath}`;
   const agent = getProxyAgent();
@@ -81,7 +89,7 @@ export async function getPlayerCode(clientKey = 'mweb', userAgent = null) {
     sts
   };
 
-  await setCachedItem(cacheKey, result, 12 * 60 * 60 * 1000);
+  playerCache.set(cacheKey, { result, expires: Date.now() + PLAYER_TTL });
   return result;
 }
 

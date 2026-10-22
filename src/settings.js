@@ -27,6 +27,24 @@ export const THEMES = [
   { id: 'light', name: 'Light' },
 ];
 
+export const AUTOPLAY_MODES = {
+  always: 'Always',
+  playlists: 'Playlists only',
+  off: 'Off',
+};
+
+export const AUDIO_QUALITIES = {
+  high: 'Highest',
+  medium: 'Medium',
+  low: 'Lowest',
+};
+
+export function pickAudioByQuality(list, quality = 'high') {
+  const sorted = [...list].sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+  const idx = quality === 'low' ? sorted.length - 1 : quality === 'medium' ? Math.floor((sorted.length - 1) / 2) : 0;
+  return sorted[idx] || null;
+}
+
 export const SPONSOR_CATEGORIES = {
   sponsor: { name: 'Sponsor', defaultBehavior: 'skip_show', color: '#00d400' },
   intro: { name: 'Intermission / Intro', defaultBehavior: 'skip_show', color: '#00d8d8' },
@@ -44,7 +62,9 @@ export const DEFAULT_SETTINGS = {
   layoutStyle: 'grid',
   uiScale: 'normal',
   defaultQuality: 'auto',
-  autoplay: true,
+  autoplayMode: 'always',
+  autoplayCountdown: 0,
+  defaultAudioQuality: 'high',
   loopVideo: false,
   trySabr: true,
   disablePopularHome: false,
@@ -78,6 +98,7 @@ export function getSettings() {
       ...DEFAULT_SETTINGS,
       ...parsed,
       layoutStyle,
+      autoplayMode: parsed.autoplayMode || (parsed.autoplay === false ? 'off' : 'always'),
       sponsorCategories: {
         ...DEFAULT_SETTINGS.sponsorCategories,
         ...(parsed.sponsorCategories || {})
@@ -205,13 +226,32 @@ export function openSettingsModal() {
 
           <div class="setting-item">
             <div class="setting-info">
-              <label class="setting-label">Autoplay Next Video</label>
-              <div class="setting-desc">Automatically play the next suggestion when video ends</div>
+              <label class="setting-label">Default Audio Quality</label>
+              <div class="setting-desc">Preferred audio stream bitrate for audio only and downloads</div>
             </div>
-            <label class="setting-switch">
-              <input type="checkbox" id="setting-autoplay" ${settings.autoplay ? 'checked' : ''}>
-              <span class="setting-slider"></span>
-            </label>
+            <select id="setting-audio-quality" class="setting-select">
+              ${Object.entries(AUDIO_QUALITIES).map(([k, v]) => `<option value="${k}" ${settings.defaultAudioQuality === k ? 'selected' : ''}>${v}</option>`).join('')}
+            </select>
+          </div>
+
+          <div class="setting-item">
+            <div class="setting-info">
+              <label class="setting-label">Autoplay Next Video</label>
+              <div class="setting-desc">When to automatically play the next video after one ends</div>
+            </div>
+            <select id="setting-autoplay" class="setting-select">
+              ${Object.entries(AUTOPLAY_MODES).map(([k, v]) => `<option value="${k}" ${settings.autoplayMode === k ? 'selected' : ''}>${v}</option>`).join('')}
+            </select>
+          </div>
+
+          <div class="setting-item">
+            <div class="setting-info">
+              <label class="setting-label">Autoplay Countdown</label>
+              <div class="setting-desc">Seconds to wait before the next video starts</div>
+            </div>
+            <select id="setting-autoplay-countdown" class="setting-select">
+              ${[0, 3, 5, 10, 15].map(n => `<option value="${n}" ${settings.autoplayCountdown === n ? 'selected' : ''}>${n ? `${n} seconds` : 'Off (instant)'}</option>`).join('')}
+            </select>
           </div>
 
           <div class="setting-item">
@@ -299,7 +339,9 @@ export function openSettingsModal() {
       customLayout: true,
       uiScale: modal.querySelector('#setting-scale').value,
       defaultQuality: modal.querySelector('#setting-quality').value,
-      autoplay: modal.querySelector('#setting-autoplay').checked,
+      autoplayMode: modal.querySelector('#setting-autoplay').value,
+      autoplayCountdown: parseInt(modal.querySelector('#setting-autoplay-countdown').value, 10),
+      defaultAudioQuality: modal.querySelector('#setting-audio-quality').value,
       loopVideo: settings.loopVideo,
       trySabr: modal.querySelector('#setting-sabr').checked,
       disablePopularHome: modal.querySelector('#setting-disable-popular')?.checked ?? false,

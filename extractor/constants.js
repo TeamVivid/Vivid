@@ -110,6 +110,23 @@ export const WEB = {
   browserVersion: '131.0.0.0',
 };
 
+export const WEB_CREATOR = {
+  ...WEB,
+  clientName: 'WEB_CREATOR',
+  clientId: '62',
+  clientVersion: '1.20261016.01.00',
+};
+
+export const WEB_REMIX = {
+  ...WEB,
+  clientName: 'WEB_REMIX',
+  clientId: '67',
+  clientVersion: '1.20261014.03.00',
+  origin: 'https://music.youtube.com',
+  pageUrl: 'https://music.youtube.com',
+  apiUrl: 'https://music.youtube.com/youtubei/v1/',
+};
+
 export const TVHTML5 = {
   clientName: 'TVHTML5',
   clientId: '31',

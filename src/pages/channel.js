@@ -30,6 +30,7 @@ export async function renderChannel(app, params) {
   }
 
   const data = await getChannel(channelId);
+  if (!app.isConnected) return;
 
   if (data.error) {
     app.innerHTML = `<div class="error-msg">${escapeHtml(data.error)}</div>`;
@@ -312,6 +313,7 @@ export async function renderChannel(app, params) {
     loadMoreBtn.addEventListener('click', async () => {
       if (!contToken) return;
       loadMoreBtn.textContent = 'Loading...';
+      loadMoreBtn.disabled = true;
       try {
         const more = await getChannelContinuation(channelId, contToken);
         for (const item of more.items || []) {
@@ -322,6 +324,8 @@ export async function renderChannel(app, params) {
         else loadMoreBtn.textContent = 'Load more';
       } catch (e) {
         loadMoreBtn.textContent = 'Error, retry';
+      } finally {
+        loadMoreBtn.disabled = false;
       }
     });
   }

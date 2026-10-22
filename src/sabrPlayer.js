@@ -234,8 +234,9 @@ function clientInfo(visitor, clientName = 'ANDROID_VR', clientVersion = '1.73.21
 }
 
 export class SabrMediaSourcePlayer {
-  constructor({ video, sabrInfo, videoFmt, audioFmt }) {
+  constructor({ video, sabrInfo, videoFmt, audioFmt, onFatal }) {
     this.video = video;
+    this.onFatal = onFatal;
     this.sabrUrl = sabrInfo.sabrUrl;
     this.visitor = sabrInfo.visitorData || '';
     this.poToken = sabrInfo.poToken || '';
@@ -548,12 +549,12 @@ export class SabrMediaSourcePlayer {
           this.guardUntil = Date.now() + 20000;
           await this.renewPoToken();
           if (result.protection === 3 && !hasBufferedMedia && !result.sawMedia) {
-            this.capped = true;
-            break;
+            return this.fail(new Error('PO token rejected after refresh'));
           }
           if (!result.sawMedia) {
             for (const [t, h] of sentHeaders) t.roundHeaders.unshift(...h);
             if (++protectionRetries <= 3) continue;
+            if (!hasBufferedMedia) return this.fail(new Error('PO token rejected after refresh'));
           }
         }
 
@@ -578,10 +579,7 @@ export class SabrMediaSourcePlayer {
       }
     } catch (e) {
       console.warn('[SABR]', e.message);
-      if (++this.failures >= 4 && !this.destroyed) {
-        this.destroyed = true;
-        this.video.dispatchEvent(new ErrorEvent('error', { message: e.message }));
-      }
+      if (++this.failures >= 4) this.fail(e);
     } finally {
       this.busy = false;
     }
@@ -696,6 +694,12 @@ export class SabrMediaSourcePlayer {
 
     for (const t of Object.values(this.tracks)) this.pump(t);
     return res;
+  }
+
+  fail(e) {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    if (!this.onFatal?.(e)) this.video.dispatchEvent(new ErrorEvent('error', { message: e.message }));
   }
 
   destroy() {

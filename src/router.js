@@ -18,6 +18,7 @@
 
 const routes = {};
 let currentCleanup = null;
+let routeId = 0;
 
 export function route(pattern, handler) {
   routes[pattern] = handler;
@@ -28,47 +29,34 @@ export function navigate(path) {
 }
 
 export async function handleRoute() {
+  const id = ++routeId;
   let hash = window.location.hash.slice(1) || '/';
   const channelPath = hash.match(/^\/(@[^/?#]+|(?:c|user)\/[^/?#]+)/);
   if (channelPath) hash = `/channel/${encodeURIComponent(channelPath[1])}`;
-  const app = document.getElementById('app');
 
   if (currentCleanup) {
     currentCleanup();
     currentCleanup = null;
   }
 
+  const app = document.createElement('div');
   app.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+  document.getElementById('app').replaceChildren(app);
+  document.body.classList.toggle('embed-mode', hash.startsWith('/embed/'));
 
-  let matched = false;
-  for (const [pattern, handler] of Object.entries(routes)) {
-    const params = matchRoute(pattern, hash);
-    if (params !== null) {
-      matched = true;
-      try {
-        const cleanup = await handler(app, params);
-        if (typeof cleanup === 'function') currentCleanup = cleanup;
-      } catch (e) {
-        app.innerHTML = `<div class="error-msg">Error: ${escapeHtml(e.message)}</div>`;
-        console.error(e);
-      }
-      break;
-    }
+  const [pattern] = Object.keys(routes).filter(p => matchRoute(p, hash) !== null);
+  const handler = routes[pattern] || routes['/'];
+  if (!handler) return;
+
+  try {
+    const cleanup = await handler(app, pattern ? matchRoute(pattern, hash) : {});
+    if (id === routeId && typeof cleanup === 'function') currentCleanup = cleanup;
+  } catch (e) {
+    if (id === routeId) app.innerHTML = `<div class="error-msg">Error: ${escapeHtml(e.message)}</div>`;
+    console.error(e);
   }
 
-  if (!matched) {
-    const homeHandler = routes['/'];
-    if (homeHandler) {
-      try {
-        const cleanup = await homeHandler(app, {});
-        if (typeof cleanup === 'function') currentCleanup = cleanup;
-      } catch (e) {
-        app.innerHTML = `<div class="error-msg">Error: ${escapeHtml(e.message)}</div>`;
-      }
-    }
-  }
-
-  window.scrollTo(0, 0);
+  if (id === routeId) window.scrollTo(0, 0);
 }
 
 function matchRoute(pattern, path) {

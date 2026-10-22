@@ -234,7 +234,19 @@ async function getChallenge(clientKey, clientVersion, userAgent) {
   };
 }
 
-export async function mintCynTokens(videoId = '', visitorData = '', options = {}) {
+let mintQueue = Promise.resolve();
+
+function serializeMint(fn) {
+  const run = mintQueue.then(() => fn());
+  mintQueue = run.catch(() => {});
+  return run;
+}
+
+export function mintCynTokens(...args) {
+  return serializeMint(() => mintCynTokens0(...args));
+}
+
+async function mintCynTokens0(videoId = '', visitorData = '', options = {}) {
   const clientKey = (options.clientKey || 'mweb').toLowerCase();
   const isTv = clientKey === 'tv' || clientKey === 'tvhtml5' || clientKey === 'tv_simply' || clientKey === 'tvhtml5_simply';
   const isTvSimply = clientKey === 'tv_simply' || clientKey === 'tvhtml5_simply';

@@ -16,72 +16,99 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-import InnerTubeClient from './innertube.js';
-import { search, searchContinuation } from './search.js';
-import { getVideoDetail, loadMoreSuggestions, getPlaylist } from './video.js';
-import { getStreamUrls, getBestAudioUrl, getCombinedStreamUrl } from './stream.js';
-import { getChannel, getChannelStreams, getChannelShorts, loadMoreChannelItems, loadChannelPlaylists, loadCommunityPosts,
-  loadChannelSections, searchChannel, getChannelAbout, loadPostComments } from './channel.js';
-import { getTrending } from './home.js';
-import { getComments, getCommentReplies } from './comments.js';
-import { getCaptionTracks, getCaptionContent, getCaptionVtt, cacheCaptionTracks } from './captions.js';
-import livechat from './livechat.js';
-import * as utils from './utils.js';
-import * as constants from './constants.js';
+import '../extractor/dnsCache.js';
+import express from 'express';
+import cors from 'cors';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import VividExtractor from '../extractor/index.js';
 
-class VividExtractor {
-  constructor(options = {}) {
-    this.client = new InnerTubeClient(options);
+import searchRoutes from './routes/search.js';
+import videoRoutes from './routes/videos.js';
+import channelRoutes from './routes/channels.js';
+import trendingRoutes from './routes/trending.js';
+import commentRoutes from './routes/comments.js';
+import captionRoutes from './routes/captions.js';
+import streamRoutes from './routes/stream.js';
+import proxyRoutes from './routes/proxy.js';
+import livechatRouter from './routes/livechat.js';
+import playlistRouter from './routes/playlists.js';
+import fullvideoRoutes from './routes/fullvideo.js';
+import authRoutes from './routes/auth.js';
+import { version, status, checkForUpdates } from './version.js';
+import { runWithRequestContext } from '../extractor/innertube.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+const app = express();
+const PORT = process.env.PORT || 3067;
+const PRIVACY_POLICY_URL = process.env.PRIVACY_POLICY_URL || process.env['PRIVACY-POLICY-URL'] || '';
+
+const extractor = new VividExtractor({
+  language: process.env.VIVID_LANG || 'en',
+});
+
+app.use(cors());
+app.use(express.json());
+
+app.use((req, res, next) => {
+  const start = process.hrtime.bigint();
+  res.on('finish', () => {
+    const ms = Number(process.hrtime.bigint() - start) / 1e6;
+    const time = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    console.log(`${time} +00:00 ${res.statusCode} ${req.method} ${req.originalUrl} ${ms.toFixed(2)}ms`);
+  });
+  next();
+});
+
+app.use((req, res, next) => {
+  req.extractor = extractor;
+  runWithRequestContext(next);
+});
+
+app.use('/api/v1/search', searchRoutes);
+app.use('/api/v1/videos', videoRoutes);
+app.use('/api/v1/channels', channelRoutes);
+app.use('/api/v1/trending', trendingRoutes);
+app.use('/api/v1/comments', commentRoutes);
+app.use('/api/v1/captions', captionRoutes);
+app.use('/api/v1/streams', streamRoutes);
+app.use('/api/v1/stream', streamRoutes);
+app.use('/api/v1/proxy', proxyRoutes);
+app.use('/api/v1/livechat', livechatRouter);
+app.use('/api/v1/playlists', playlistRouter);
+app.use('/api/v1/fullvideo', fullvideoRoutes);
+app.use('/api/v1/auth', authRoutes);
+
+app.get('/api/v1', (req, res) => {
+  res.json({
+    name: 'Vivid API',
+    version,
+    behind: status.behind,
+    privacyPolicyUrl: PRIVACY_POLICY_URL,
+    website: 'https://github.com/TeamVivid/Vivid'
+  });
+});
+
+const distPath = join(__dirname, '..', 'dist');
+app.use(express.static(distPath));
+app.use((req, res) => {
+  if (!['GET', 'HEAD'].includes(req.method) || req.path.startsWith('/api/') || (req.path.includes('.') && !req.path.startsWith('/@'))) {
+    return res.status(404).send('Not found');
   }
 
-  setLanguage(lang) { this.client.setLanguage(lang); }
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Surrogate-Control', 'no-store');
 
-  async search(query, filters = {}) { return search(this.client, query, filters); }
-  async searchContinuation(token) { return searchContinuation(this.client, token); }
-  async getVideoDetail(videoId, playlistId) { return getVideoDetail(this.client, videoId, playlistId); }
-  async loadMoreSuggestions(token) { return loadMoreSuggestions(this.client, token); }
-  async getPlaylist(playlistId) { return getPlaylist(this.client, playlistId); }
-  async getStreamUrls(videoId, options = {}) { return getStreamUrls(this.client, videoId, options); }
-  async getBestAudioUrl(videoId) { return getBestAudioUrl(this.client, videoId); }
-  async getChannel(urlOrId) { return getChannel(this.client, urlOrId); }
-  async getChannelStreams(urlOrId) { return getChannelStreams(this.client, urlOrId); }
-  async getChannelShorts(urlOrId) { return getChannelShorts(this.client, urlOrId); }
-  async loadMoreChannelItems(token) { return loadMoreChannelItems(this.client, token); }
-  async loadChannelPlaylists(browseId, params) { return loadChannelPlaylists(this.client, browseId, params); }
-  async loadCommunityPosts(channelUrl, token) { return loadCommunityPosts(this.client, channelUrl, token); }
-  async loadChannelSections(browseId, params) { return loadChannelSections(this.client, browseId, params); }
-  async searchChannel(urlOrId, query) { return searchChannel(this.client, urlOrId, query); }
-  async getChannelAbout(urlOrId) { return getChannelAbout(this.client, urlOrId); }
-  async loadPostComments(postId, channelId, token) { return loadPostComments(this.client, postId, channelId, token); }
-  async getTrending() { return getTrending(this.client); }
-  async getComments(token, type, useWeb) { return getComments(this.client, token, type, useWeb); }
-  async getCommentReplies(token, useWeb) { return getCommentReplies(this.client, token, useWeb); }
-  async getCaptionTracks(videoId) { return getCaptionTracks(this.client, videoId); }
-  async getCaptionContent(baseUrl, lang) { return getCaptionContent(baseUrl, lang); }
-  async getCaptionVtt(baseUrl, lang) { return getCaptionVtt(baseUrl, lang); }
-  cacheCaptionTracks(videoId, renderer) { return cacheCaptionTracks(videoId, renderer); }
-  async getFullVideo(videoId, options = {}) {
-    const listId = options.list || options.playlistId || null;
-    const [video, streams, captions] = await Promise.all([
-      this.getVideoDetail(videoId, listId),
-      this.getStreamUrls(videoId, options),
-      this.getCaptionTracks(videoId)
-    ]);
-    if (streams && streams.duration && (!video.duration || video.duration === 0)) {
-      video.duration = Math.round(streams.duration / 1000);
-    }
-    if (streams?.isLivestream) {
-      video.isLivestream = true;
-    }
-    return {
-      videoId,
-      video,
-      streams,
-      captions
-    };
-  }
-  async getLiveChat(token, options) { return livechat.getLiveChat(this.client, token, options); }
-}
+  res.sendFile(join(distPath, 'index.html'));
+});
 
-export default VividExtractor;
-export { InnerTubeClient, utils, constants, livechat };
+app.listen(PORT, () => {
+  console.log(`Vivid ${version} is running on http://localhost:${PORT}`);
+  checkForUpdates();
+});
+
+export default app;

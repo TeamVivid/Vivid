@@ -619,27 +619,13 @@ export async function getStreamUrls(client, videoId, options = {}) {
   }
 
   if (trySabr) {
-    if (isMwebRequested) {
+    for (const key of isWebRequested ? ['web', 'mweb'] : ['mweb', 'web']) {
       try {
-        const mwebRes = await extractJsClient(client, videoId, 'mweb', true);
-        if (mwebRes) return mwebRes;
+        const res = await extractJsClient(client, videoId, key, true);
+        if (res) return res;
       } catch (e) {
-        lastError = `MWEB client failed: ${e.message}`;
+        lastError = `${key.toUpperCase()} client failed: ${e.message}`;
       }
-    }
-
-    try {
-      const webRes = await extractJsClient(client, videoId, 'web', true);
-      if (webRes) return webRes;
-    } catch (e) {
-      lastError = `WEB client failed: ${e.message}`;
-    }
-
-    try {
-      const mwebRes = await extractJsClient(client, videoId, 'mweb', true);
-      if (mwebRes) return mwebRes;
-    } catch (e) {
-      lastError = `MWEB client failed: ${e.message}`;
     }
 
     try {

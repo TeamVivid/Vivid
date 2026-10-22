@@ -19,48 +19,44 @@
 import { getTrending, getChannel, proxyImageUrl } from '../api.js';
 import { escapeHtml } from '../router.js';
 import { getSettings } from '../settings.js';
+import { videoMenuButton } from '../videoMenu.js';
 
 export async function renderHome(app) {
-  let showSubs = localStorage.getItem('vivid_subs_toggle') === 'true';
-  document.title = showSubs ? 'Subscriptions - Vivid' : 'Trending - Vivid';
   const subsIds = JSON.parse(localStorage.getItem('vivid_subs') || '[]');
+  const showSubs = subsIds.length > 0 && localStorage.getItem('vivid_subs_toggle') === 'true';
+  document.title = showSubs ? 'Subscriptions - Vivid' : 'Trending - Vivid';
   const settings = getSettings();
   const isListLayout = settings.layoutStyle === 'list';
+  const subsBtn = `<button id="toggle-subs" class="search-chip${showSubs ? ' active' : ''}" style="cursor:pointer;" ${subsIds.length === 0 ? 'disabled' : ''}>${showSubs ? 'Show Trending' : 'Show Subscriptions'}</button>`;
+  const toggleSubs = () => {
+    localStorage.setItem('vivid_subs_toggle', showSubs ? 'false' : 'true');
+    renderHome(app);
+  };
 
   if (settings.disablePopularHome && !showSubs) {
     document.title = 'Vivid';
     app.innerHTML = `
       <div style="display:flex; justify-content:flex-end; align-items:center; margin-bottom:1rem;">
-        <label style="background:var(--bg-card); padding:6px 16px; border-radius:16px; border:1px solid var(--border-color); cursor:pointer;">
-          <input type="checkbox" id="toggle-subs" ${showSubs ? 'checked' : ''} ${subsIds.length === 0 ? 'disabled' : ''}> Show Subscriptions
-        </label>
+        ${subsBtn}
       </div>
       <div id="home-grid"></div>
     `;
 
-    document.getElementById('toggle-subs').addEventListener('change', (e) => {
-      localStorage.setItem('vivid_subs_toggle', e.target.checked ? 'true' : 'false');
-      renderHome(app);
-    });
+    document.getElementById('toggle-subs').addEventListener('click', toggleSubs);
     return;
   }
 
   app.innerHTML = `
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
       <h1 class="page-title" style="margin:0;">${showSubs ? 'Subscriptions' : 'Trending'}</h1>
-      <label style="background:var(--bg-card); padding:6px 16px; border-radius:16px; border:1px solid var(--border-color); cursor:pointer;">
-        <input type="checkbox" id="toggle-subs" ${showSubs ? 'checked' : ''} ${subsIds.length === 0 ? 'disabled' : ''}> Show Subscriptions
-      </label>
+      ${subsBtn}
     </div>
     <div class="${isListLayout ? 'video-list' : 'video-grid'}" id="home-grid">
       <div class="loading" style="grid-column:1/-1;"><div class="spinner"></div></div>
     </div>
   `;
 
-  document.getElementById('toggle-subs').addEventListener('change', (e) => {
-    localStorage.setItem('vivid_subs_toggle', e.target.checked ? 'true' : 'false');
-    renderHome(app);
-  });
+  document.getElementById('toggle-subs').addEventListener('click', toggleSubs);
 
   const grid = document.getElementById('home-grid');
 
@@ -140,7 +136,7 @@ export function videoCard(v, isList = false) {
             </div>
           </div>
         </div>
-        ${vid ? `<a href="#/watch?v=${vid}&audio=1" class="video-listen-pill" title="Listen (Audio Only)">🎧 Listen</a>` : ''}
+        ${videoMenuButton(v, thumb)}
       </div>
     `;
   }
@@ -160,7 +156,7 @@ export function videoCard(v, isList = false) {
           </div>
         </div>
       </div>
-      ${vid ? `<a href="#/watch?v=${vid}&audio=1" class="video-listen-pill" title="Listen (Audio Only)">🎧 Listen</a>` : ''}
+      ${videoMenuButton(v, thumb)}
     </div>
   `;
 }

@@ -35,6 +35,7 @@ import playlistRouter from './routes/playlists.js';
 import fullvideoRoutes from './routes/fullvideo.js';
 import authRoutes from './routes/auth.js';
 import { version, status, checkForUpdates } from './version.js';
+import { runWithRequestContext } from '../extractor/innertube.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -62,7 +63,7 @@ app.use((req, res, next) => {
 
 app.use((req, res, next) => {
   req.extractor = extractor;
-  next();
+  runWithRequestContext(next);
 });
 
 app.use('/api/v1/search', searchRoutes);

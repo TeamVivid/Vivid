@@ -41,6 +41,7 @@ if (location.pathname !== '/' && !location.hash) {
 route('/', renderHome);
 route('/results', renderSearch);
 route('/watch', renderWatch);
+route('/embed/:id', (app, params) => renderWatch(app, { ...params, v: params.id, embed: '1' }));
 route('/channel/:id', renderChannel);
 route('/playlist', renderPlaylist);
 route('/playlists', renderUserPlaylists);
@@ -164,6 +165,7 @@ window.addEventListener('DOMContentLoaded', () => {
   if (logoLink) {
     logoLink.addEventListener('click', (e) => {
       if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
         window.open(window.location.origin + window.location.pathname, '_blank');
         return;
       }

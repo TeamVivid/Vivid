@@ -54,7 +54,7 @@ The app will be available at `http://localhost:3067`.
 ## Configuration (Config Files)
 
 
-- `cookies.txt`: create a cookies.txt file to bypass login requirements
+- `cookies*.txt`: create a cookies.txt file or multiple cookies*.txt files to bypass login requirements
 - `proxies.txt`: create a proxies.txt file to bypass IP bans
 
 

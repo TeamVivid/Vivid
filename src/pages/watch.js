@@ -21,12 +21,13 @@ import 'video.js/dist/video-js.css';
 import { getVideo, getStreams, getFullVideo, getComments, getCommentReplies, getCaptions, proxyImageUrl, proxyStreamUrl, proxyHlsUrl, getSponsorBlockSegments, syncAccount } from '../api.js';
 import { escapeHtml } from '../router.js';
 import { verifiedBadge } from './home.js';
-import { getSettings, saveSettings, SPONSOR_CATEGORIES } from '../settings.js';
+import { getSettings, saveSettings, SPONSOR_CATEGORIES, AUTOPLAY_MODES, AUDIO_QUALITIES, pickAudioByQuality } from '../settings.js';
 import { getPlaylists, addVideoToPlaylist, removeVideoFromPlaylist, isVideoInPlaylist, createPlaylist, syncWithServer } from '../playlistManager.js';
 import { getShuffleOrder, startShuffle, stopShuffle } from '../shuffle.js';
 import { SabrMediaSourcePlayer } from '../sabrPlayer.js';
 import { DashMediaSourcePlayer } from '../dashPlayer.js';
 import { startLiveChat } from '../liveChat.js';
+import { videoMenuButton } from '../videoMenu.js';
 import { downloadAdaptive, downloadSabr, fetchStreamBlob, muxBlobs, DOWNLOAD_FORMATS } from '../downloader.js';
 
 let vjsPlayer = null;
@@ -35,6 +36,26 @@ let audioTrackPlayer = null;
 let audioSyncInterval = null;
 let stopChat = null;
 let sponsorSegments = [];
+const THEATRE_KEY = 'vivid_theatre';
+const CLIENT_ORDER = ['mweb', 'web', 'tv', 'tv_simply', 'visionos'];
+
+function clientKey(name = '') {
+  const n = name.toLowerCase();
+  if (n.includes('simply')) return 'tv_simply';
+  if (n.includes('vision')) return 'visionos';
+  if (n.includes('tv')) return 'tv';
+  return n.includes('mweb') || !n.includes('web') ? 'mweb' : 'web';
+}
+
+function nextClientHash({ videoId, listId, isEmbed, audioParam, current, time = 0 }) {
+  const next = CLIENT_ORDER[CLIENT_ORDER.indexOf(current) + 1];
+  if (!next) return null;
+  console.warn(`[client] ${current} failed, trying ${next}`);
+  return isEmbed
+    ? `#/embed/${videoId}?forceclient=${next}`
+    : `#/watch?v=${videoId}${listId ? '&list=' + listId : ''}&forceclient=${next}${audioParam}${time ? '&t=' + time : ''}`;
+}
+
 const MEDIA_ACTIONS = ['play', 'pause', 'seekbackward', 'seekforward', 'seekto', 'nexttrack'];
 const VOLUME_KEY = 'vivid_volume';
 const savedVolume = (() => {
@@ -154,6 +175,7 @@ export async function renderWatch(app, params) {
   let streamsObj = {};
   let capsObj = null;
 
+  const isEmbed = params.embed === '1';
   const isAudioOnly = params.audio === '1' || params.listen === '1';
   const audioParam = isAudioOnly ? '&audio=1' : '';
 
@@ -187,6 +209,8 @@ export async function renderWatch(app, params) {
     } catch {}
   }
 
+  if (!app.isConnected) return;
+
   sponsorSegments = [];
   if (sponsorRes.status === 'fulfilled' && Array.isArray(sponsorRes.value)) {
     sponsorSegments = sponsorRes.value;
@@ -197,6 +221,11 @@ export async function renderWatch(app, params) {
     return;
   }
   if (streamsObj.error) {
+    const next = nextClientHash({ videoId, listId, isEmbed, audioParam, current: forceClient ? clientKey(forceClient) : 'web' });
+    if (next) {
+      location.hash = next;
+      return;
+    }
     app.innerHTML = `<div class="error-msg">Stream Error: ${escapeHtml(streamsObj.error)}</div>`;
     return;
   }
@@ -208,25 +237,27 @@ export async function renderWatch(app, params) {
   }
 
   const appSettings = getSettings();
+  let audioQuality = appSettings.defaultAudioQuality;
   const qualities = [];
 
   const trackKey = (a) => `${a.audioTrackId || ''}|${a.displayName || ''}`;
 
   const sabrAudioFor = (video, choice) => {
-    if (!video) {
-      return (choice && streamsObj.audioStreams.find(a => trackKey(a) === trackKey(choice)))
-        || streamsObj.audioStreams.find(a => a.isDefault)
-        || streamsObj.audioStreams.find(a => a.isOriginal)
-        || streamsObj.audioStreams[0];
-    }
-    const container = video.mimeType.split(';')[0].split('/')[1];
-    const sameContainer = streamsObj.audioStreams.filter(a => a.mimeType.includes(`/${container}`));
+    const container = video?.mimeType.split(';')[0].split('/')[1];
+    const sameContainer = video ? streamsObj.audioStreams.filter(a => a.mimeType.includes(`/${container}`)) : [];
     const pool = sameContainer.length ? sameContainer : streamsObj.audioStreams;
-    return (choice && pool.find(a => trackKey(a) === trackKey(choice)))
+    const track = (choice && pool.find(a => trackKey(a) === trackKey(choice)))
       || pool.find(a => a.isDefault) || pool.find(a => a.isOriginal) || pool[0];
+    return pickAudioByQuality(pool.filter(a => trackKey(a) === trackKey(track)), audioQuality) || track;
   };
 
   const isTvClient = streamsObj.usedClient === 'TVHTML5_SIMPLY' || streamsObj.sabr?.clientName === 'TVHTML5_SIMPLY' || streamsObj.usedClient === 'tv_simply' || forceClient === 'tv_simply' || forceClient === 'tvhtml5_simply';
+  const currentClient = clientKey(forceClient || streamsObj.sabr?.clientName || streamsObj.usedClient);
+  const tryNextClient = () => {
+    const next = app.isConnected && nextClientHash({ videoId, listId, isEmbed, audioParam, current: currentClient, time: Math.floor(window.vjsPlayer?.currentTime?.() || 0) });
+    if (next) location.hash = next;
+    return !!next;
+  };
   if (streamsObj.sabr?.available && appSettings.trySabr && !isTvClient) {
     if (streamsObj.qualityMap && Object.keys(streamsObj.qualityMap).length) {
       for (const [res, stream] of Object.entries(streamsObj.qualityMap).sort((a,b)=>b[0]-a[0])) {
@@ -284,12 +315,14 @@ export async function renderWatch(app, params) {
   if (initialAudioIdx === -1) initialAudioIdx = 0;
 
   const activeAudio = audioOptions[initialAudioIdx] || audioOptions[0];
-  const audioCandidates = audioOptions.filter(a => a.url);
-  const preferredAudio = audioCandidates.find(a => (a.mimeType || '').includes('mp4') && trackKey(a) === trackKey(activeAudio))
-    || audioCandidates.find(a => (a.mimeType || '').includes('mp4'))
-    || audioCandidates.find(a => trackKey(a) === trackKey(activeAudio))
-    || audioCandidates[0]
-    || activeAudio;
+  const directAudioFor = (track, quality) => {
+    const all = (streamsObj.audioStreams || []).filter(a => a.url && probe.canPlayType(a.mimeType));
+    const sameTrack = all.filter(a => !track || trackKey(a) === trackKey(track));
+    const pool = sameTrack.length ? sameTrack : all;
+    const mp4 = pool.filter(a => (a.mimeType || '').includes('mp4'));
+    return pickAudioByQuality(mp4.length ? mp4 : pool, quality);
+  };
+  const preferredAudio = directAudioFor(activeAudio, audioQuality) || activeAudio;
 
   if (isAudioOnly) {
     if (preferredAudio?.url) {
@@ -422,7 +455,7 @@ export async function renderWatch(app, params) {
                 <div class="watch-extra">
                   <h3 class="watch-extra-title">Video details</h3>
                   <dl class="watch-details">
-                    ${[['Date', detailObj.publishDate], ['Views', detailObj.views], ['Likes', detailObj.likes && detailObj.likes !== '0' ? detailObj.likes : '']]
+                    ${[['Date', detailObj.publishDate], ['Views', detailObj.views], ['Likes', detailObj.likes && detailObj.likes !== '0' ? detailObj.likes : ''], ['Category', detailObj.category], ['License', detailObj.license], ['Visibility', detailObj.visibility]]
                       .filter(([, v]) => v).map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('')}
                   </dl>
                 </div>
@@ -514,7 +547,7 @@ export async function renderWatch(app, params) {
   audioTrackPlayer = document.createElement('audio');
 
   vjsPlayer = window.vjsPlayer = videojs('vjs-video', {
-    fluid: true,
+    fill: true,
     poster: posterUrl,
     html5: { preloadTextTracks: false },
     playbackRates: [0.25, 0.5, 1, 1.25, 1.5, 2],
@@ -625,9 +658,13 @@ export async function renderWatch(app, params) {
     vjsPlayer.ready(() => {
       vjsPlayer.play()?.catch(() => {});
     });
+  } else {
+    vjsPlayer.on('error', () => {
+      if (vjsPlayer.currentSrc() && !window.sabrPlayerInstance) tryNextClient();
+    });
   }
 
-  if (detailObj.liveChat) {
+  if (detailObj.liveChat && !isEmbed) {
     const chatPanel = document.querySelector('.live-chat-panel');
     const chatToggle = document.getElementById('live-chat-toggle');
     chatToggle.addEventListener('click', () => {
@@ -644,18 +681,34 @@ export async function renderWatch(app, params) {
     });
   }
 
+  let countdownTimer = null;
+  const cancelCountdown = () => {
+    clearInterval(countdownTimer);
+    countdownTimer = null;
+    vjsPlayer?.el()?.querySelector('.autoplay-countdown')?.remove();
+  };
+  const goNext = () => {
+    cancelCountdown();
+    const nextId = nextVideos[0] && idOf(nextVideos[0]);
+    if (nextId) window.location.hash = `#/watch?v=${nextId}${listId ? '&list=' + listId : ''}${clientParam}${audioParam}`;
+  };
   const playNext = () => {
-    if (document.getElementById('ps-loop').checked) return;
-    if (!document.getElementById('ps-autoplay').checked) return;
-
-    const next = nextVideos[0];
-    if (!next) return;
-    const nextId = next.videoId || next.id;
-    if (nextId) {
-      window.location.hash = `#/watch?v=${nextId}${listId ? '&list=' + listId : ''}${clientParam}${audioParam}`;
-    }
+    const { autoplayMode, autoplayCountdown } = getSettings();
+    if (isEmbed || !nextVideos[0] || document.getElementById('ps-loop').checked || autoplayMode === 'off' || (autoplayMode === 'playlists' && !listId)) return;
+    if (!autoplayCountdown || document.hidden) return goNext();
+    let left = autoplayCountdown;
+    const box = document.createElement('div');
+    box.className = 'autoplay-countdown';
+    box.innerHTML = `<div>Up next in <b>${left}</b>s</div><div class="autoplay-countdown-title">${escapeHtml(nextVideos[0].title || '')}</div><button type="button" class="modal-btn-secondary">Cancel</button>`;
+    box.querySelector('button').addEventListener('click', cancelCountdown);
+    vjsPlayer.el().appendChild(box);
+    countdownTimer = setInterval(() => {
+      box.querySelector('b').textContent = --left;
+      if (left <= 0) goNext();
+    }, 1000);
   };
   vjsPlayer.on('ended', playNext);
+  vjsPlayer.on(['play', 'seeking', 'dispose'], cancelCountdown);
   audioTrackPlayer.addEventListener('ended', () => {
     if (!document.hidden) return;
     if (document.getElementById('ps-loop').checked) {
@@ -684,8 +737,17 @@ export async function renderWatch(app, params) {
   <div class="vjs-settings-section">
   <label><input type="checkbox" id="ps-loop" ${appSettings.loop ? 'checked' : ''}> Loop Video</label>
   </div>
+  <div class="vjs-settings-section" ${isAudioOnly ? '' : 'style="display:none;"'}>
+  <label>Audio Quality</label>
+  <select id="ps-audio-quality">
+  ${Object.entries(AUDIO_QUALITIES).map(([k, v]) => `<option value="${k}" ${k === audioQuality ? 'selected' : ''}>${v}</option>`).join('')}
+  </select>
+  </div>
   <div class="vjs-settings-section">
-  <label><input type="checkbox" id="ps-autoplay" ${appSettings.autoplay ? 'checked' : ''}> Autoplay</label>
+  <label>Autoplay</label>
+  <select id="ps-autoplay">
+  ${Object.entries(AUTOPLAY_MODES).map(([k, v]) => `<option value="${k}" ${k === appSettings.autoplayMode ? 'selected' : ''}>${v}</option>`).join('')}
+  </select>
   </div>
   </div>
   `;
@@ -700,6 +762,17 @@ export async function renderWatch(app, params) {
     title: 'Settings',
   }, fullscreenIdx !== -1 ? fullscreenIdx : undefined);
   settingsBtn.el().innerHTML = '<span class="vjs-icon-placeholder vjs-icon-cog" aria-hidden="true"></span>';
+  const layoutEl = document.querySelector('.watch-layout');
+  const toggleTheatre = () => {
+    try { localStorage.setItem(THEATRE_KEY, layoutEl.classList.toggle('theatre') ? '1' : ''); } catch {}
+  };
+  if (localStorage.getItem(THEATRE_KEY)) layoutEl.classList.add('theatre');
+  const theatreBtn = vjsPlayer.controlBar.addChild('button', {
+    className: 'vjs-visible-control vjs-control vjs-button vjs-theatre-btn',
+    title: 'Theatre mode (t)',
+  }, fullscreenIdx !== -1 ? fullscreenIdx : undefined);
+  theatreBtn.el().innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="1"/></svg>';
+  theatreBtn.el().addEventListener('click', toggleTheatre);
   settingsBtn.el().addEventListener('click', () => {
     document.getElementById('player-settings-menu').classList.toggle('hidden');
   });
@@ -826,6 +899,8 @@ export async function renderWatch(app, params) {
       }
     }
 
+    if (e.code === 'KeyT' && !e.ctrlKey && !e.metaKey) toggleTheatre();
+
     if (e.code === 'KeyF') {
       e.preventDefault();
       if (vjsPlayer.isFullscreen()) {
@@ -889,12 +964,7 @@ export async function renderWatch(app, params) {
       seekforward: () => vjsPlayer.currentTime(vjsPlayer.currentTime() + 10),
       seekto: (d) => vjsPlayer.currentTime(d.seekTime),
     };
-    actions.nexttrack = () => {
-      const next = nextVideos[0];
-      if (next && idOf(next)) {
-        window.location.hash = `#/watch?v=${idOf(next)}${listId ? '&list=' + listId : ''}${clientParam}${audioParam}`;
-      }
-    };
+    actions.nexttrack = goNext;
     for (const [action, handler] of Object.entries(actions)) session.setActionHandler(action, handler);
   }
 
@@ -1143,10 +1213,11 @@ export async function renderWatch(app, params) {
       isAudioTrackActive = false;
       audioTrackPlayer.pause();
       audioTrackPlayer.src = '';
+      let player;
       try {
         const vidEl = vjsPlayer.tech({ IWillNotUseThisInPlugins: true })?.el() || vjsPlayer.el().querySelector('video');
-        const player = q.type === 'sabr'
-          ? new SabrMediaSourcePlayer({ video: vidEl, sabrInfo: q.sabrInfo, videoFmt: q.videoFmt || null, audioFmt: sabrAudioFor(q.videoFmt, audioChoice) })
+        player = q.type === 'sabr'
+          ? new SabrMediaSourcePlayer({ video: vidEl, sabrInfo: q.sabrInfo, videoFmt: q.videoFmt || null, audioFmt: sabrAudioFor(q.videoFmt, audioChoice), onFatal: tryNextClient })
           : new DashMediaSourcePlayer({
               video: vidEl,
               videoFmt: { url: proxyStreamUrl(q.url), mimeType: q.mimeType },
@@ -1154,11 +1225,14 @@ export async function renderWatch(app, params) {
             });
         window.sabrPlayerInstance = player;
         await player.init();
+        if (window.sabrPlayerInstance !== player) return;
         vjsPlayer.currentTime(ct);
         if (!paused) vjsPlayer.play();
         return;
       } catch (e) {
+        if (player && window.sabrPlayerInstance !== player) return;
         console.warn('Streaming failed, falling back:', e);
+        if (q.type === 'sabr' && tryNextClient()) return;
         if (window.sabrPlayerInstance) {
           window.sabrPlayerInstance.destroy();
           window.sabrPlayerInstance = null;
@@ -1241,9 +1315,7 @@ export async function renderWatch(app, params) {
     const q = qualities[document.getElementById('ps-quality').value];
     const a = audioOptions[e.target.value];
     if (q?.type === 'audio_direct') {
-      const match = audioOptions.find(opt => opt.url && trackKey(opt) === trackKey(a) && (opt.mimeType || '').includes('mp4'))
-        || audioOptions.find(opt => opt.url && trackKey(opt) === trackKey(a))
-        || a;
+      const match = directAudioFor(a, audioQuality) || a;
       if (match?.url) {
         q.url = match.url;
         q.mimeType = match.mimeType;
@@ -1260,8 +1332,13 @@ export async function renderWatch(app, params) {
     }
   });
 
+  document.getElementById('ps-audio-quality').addEventListener('change', (e) => {
+    audioQuality = e.target.value;
+    document.getElementById('ps-audio').dispatchEvent(new Event('change'));
+  });
+
   document.getElementById('ps-autoplay').addEventListener('change', (e) => {
-    saveSettings({ ...getSettings(), autoplay: e.target.checked });
+    saveSettings({ ...getSettings(), autoplayMode: e.target.value });
   });
 
   document.getElementById('ps-loop').addEventListener('change', (e) => {
@@ -1417,16 +1494,18 @@ export async function renderWatch(app, params) {
     });
   }
 
-  const loadCommentsBtn = document.getElementById('load-comments');
+  const loadCommentsBtn = isEmbed ? null : document.getElementById('load-comments');
   if (loadCommentsBtn) {
     let commentToken = detailObj.comments?.continuationToken || '';
     let commentType = detailObj.comments?.type ?? 1;
     const authorIcon = detailObj.author?.iconUrl || '';
     loadCommentsBtn.addEventListener('click', async () => {
       loadCommentsBtn.textContent = 'Loading...';
+      loadCommentsBtn.disabled = true;
       if (!detailObj.isLivestream) {
         try {
           const data = await getComments(videoId, commentToken || undefined, commentType);
+          if (!loadCommentsBtn.isConnected) return;
           const list = document.getElementById('comments-list');
           for (const c of data.comments || []) {
             list.insertAdjacentHTML('beforeend', renderComment(c, videoId, false, authorIcon));
@@ -1438,6 +1517,8 @@ export async function renderWatch(app, params) {
           attachReplyListeners(videoId, authorIcon);
         } catch (e) {
           loadCommentsBtn.textContent = 'Error, retry';
+        } finally {
+          loadCommentsBtn.disabled = false;
         }
       } else {
         loadCommentsBtn.remove();
@@ -1477,8 +1558,10 @@ export function attachReplyListeners(videoId, authorIcon = '', web = false) {
       const token = btn.getAttribute('data-token');
       const target = document.getElementById(btn.getAttribute('data-target'));
       btn.textContent = 'Loading...';
+      btn.disabled = true;
       try {
         const data = await getCommentReplies(videoId, token, web);
+        if (!btn.isConnected) return;
         for (const r of data.replies || []) {
           target.insertAdjacentHTML('beforeend', renderComment(r, videoId, true, authorIcon));
         }
@@ -1491,6 +1574,8 @@ export function attachReplyListeners(videoId, authorIcon = '', web = false) {
         attachReplyListeners(videoId, authorIcon, web);
       } catch(e) {
         btn.textContent = 'Error';
+      } finally {
+        btn.disabled = false;
       }
     });
   });
@@ -1519,7 +1604,7 @@ function renderSuggestion(s, listId, i, currentIdx, forceClient = '', audioParam
   const statsHtml = s.views ? `<span class="suggestion-stats">${escapeHtml(s.views)}</span>` : '';
 
   return `
-    <div class="suggestion-item${isPlaying ? ' suggestion-playing' : ''}${isNext ? ' suggestion-next' : ''}" onclick="if (!event.target.closest('a')) location.hash = '${href}';" style="cursor:pointer;">
+    <div class="suggestion-item${isPlaying ? ' suggestion-playing' : ''}${isNext ? ' suggestion-next' : ''}" onclick="if (!event.target.closest('a, .video-menu-btn, .video-menu')) location.hash = '${href}';" style="cursor:pointer;">
       <a href="${href}" class="suggestion-thumb" tabindex="-1">
         <img src="${proxyImageUrl(s.thumbnailUrl || '')}" alt="" loading="lazy">
         ${s.duration ? `<span class="video-card-duration">${escapeHtml(s.duration)}</span>` : ''}
@@ -1531,6 +1616,7 @@ function renderSuggestion(s, listId, i, currentIdx, forceClient = '', audioParam
           ${statsHtml}
         </div>
       </div>
+      ${videoMenuButton(s, s.thumbnailUrl || '')}
     </div>
   `;
 }
@@ -1589,7 +1675,7 @@ export function renderComment(c, videoId, isReply = false, channelAuthorIcon = '
   `;
 }
 
-function openSavePlaylistModal(videoObj) {
+export function openSavePlaylistModal(videoObj) {
   const existing = document.getElementById('save-playlist-modal');
   if (existing) existing.remove();
 
@@ -1682,6 +1768,7 @@ function openDownloadModal(videoObj, streamsObj, currentActiveStream, forceClien
 
   const safeTitle = (videoObj.title || 'video').replace(/[/\\?%*:|"<>]/g, '_').trim();
   const vidId = videoObj.videoId || '';
+  let audioQuality = getSettings().defaultAudioQuality;
 
   const isSabrMode = currentActiveStream?.type === 'sabr'
     || (typeof SabrMediaSourcePlayer !== 'undefined' && window.sabrPlayerInstance instanceof SabrMediaSourcePlayer)
@@ -1769,10 +1856,11 @@ function openDownloadModal(videoObj, streamsObj, currentActiveStream, forceClien
     return true;
   };
 
-  const pickAudio = (list, format, best) => {
-    const sorted = [...list].sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-    if (format === 'mkv' || format === 'mp3') return best || sorted[0] || null;
-    return sorted.find(a => fitsFormat(a, format)) || (format === 'mp4' ? sorted[0] : null) || null;
+  const pickAudio = (list, format) => {
+    const main = list.filter(a => a.isDefault);
+    const pool = main.length ? main : list;
+    if (format === 'mkv' || format === 'mp3') return pickAudioByQuality(pool, audioQuality);
+    return pickAudioByQuality(pool.filter(a => fitsFormat(a, format)), audioQuality) || (format === 'mp4' ? pickAudioByQuality(pool, audioQuality) : null);
   };
 
   const buildOptions = (format, { direct, sabr }) => {
@@ -1810,7 +1898,7 @@ function openDownloadModal(videoObj, streamsObj, currentActiveStream, forceClien
 
       if (isSabrMode) {
         if (sabr?.sabr?.available && sabr.videoStreams?.length) {
-          const sabrAudio = pickAudio(sabr.audioStreams || [], format, sabr.bestAudio);
+          const sabrAudio = pickAudio(sabr.audioStreams || [], format);
           for (const v of uniqueByRes(sabr.videoStreams.filter(x => fitsFormat(x, format)))) {
             const qLabel = v.qualityLabel || `${v.height}p`;
             options.push({
@@ -1827,7 +1915,7 @@ function openDownloadModal(videoObj, streamsObj, currentActiveStream, forceClien
           }
         }
       } else if (direct?.videoStreams?.length) {
-        const directAudio = pickAudio((direct.audioStreams || []).filter(a => a.url), format, direct.bestAudio);
+        const directAudio = pickAudio((direct.audioStreams || []).filter(a => a.url), format);
         const aBytes = directAudio ? (directAudio.contentLength || (directAudio.bitrate && videoObj.duration ? Math.round((directAudio.bitrate * videoObj.duration) / 8) : 0)) : 0;
         const videos = direct.videoStreams.filter(v => v.url && !v.isSabr && fitsFormat(v, format));
         for (const v of uniqueByRes(videos)) {
@@ -1850,7 +1938,7 @@ function openDownloadModal(videoObj, streamsObj, currentActiveStream, forceClien
     }
 
     const audioPool = [...(direct?.audioStreams || []), ...(sabr?.audioStreams || [])].filter(a => a.url);
-    const anyAudio = pickAudio(audioPool, format, direct?.bestAudio?.url ? direct.bestAudio : null);
+    const anyAudio = pickAudio(audioPool, format);
     if (anyAudio?.url) {
       options.push({
         id: 'audio-only',
@@ -1922,6 +2010,13 @@ function openDownloadModal(videoObj, streamsObj, currentActiveStream, forceClien
       </div>
 
       <div style="margin-bottom:1rem;">
+        <label for="dl-audio-quality" style="display:block;font-size:0.8rem;font-weight:600;color:var(--text-secondary);margin-bottom:6px;">Audio Quality:</label>
+        <select id="dl-audio-quality" style="width:100%;padding:8px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-size:0.86rem;outline:none;cursor:pointer;">
+          ${Object.entries(AUDIO_QUALITIES).map(([k, v]) => `<option value="${k}" ${k === audioQuality ? 'selected' : ''}>${v}</option>`).join('')}
+        </select>
+      </div>
+
+      <div style="margin-bottom:1rem;">
         <label for="dl-format-select" style="display:block;font-size:0.8rem;font-weight:600;color:var(--text-secondary);margin-bottom:6px;">Select Quality:</label>
         <select id="dl-format-select" style="width:100%;padding:8px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-size:0.86rem;outline:none;cursor:pointer;">
           ${renderSelectOptions()}
@@ -1964,6 +2059,7 @@ function openDownloadModal(videoObj, streamsObj, currentActiveStream, forceClien
 
     const selectEl = container.querySelector('#dl-format-select');
     const formatEl = container.querySelector('#dl-container-select');
+    const audioQualityEl = container.querySelector('#dl-audio-quality');
     const startBtn = container.querySelector('#dl-start-btn');
     const startBtnText = container.querySelector('#dl-start-btn-text');
     const directBtn = container.querySelector('#dl-direct-btn');
@@ -1992,13 +2088,16 @@ function openDownloadModal(videoObj, streamsObj, currentActiveStream, forceClien
 
     updateSelectedUI();
 
-    formatEl.addEventListener('change', () => {
+    const rebuildOptions = () => {
       format = formatEl.value;
+      audioQuality = audioQualityEl.value;
       options = buildOptions(format, sources);
       selected = options[0] || null;
       selectEl.innerHTML = options.length ? renderSelectOptions() : '<option>No streams for this format</option>';
       updateSelectedUI();
-    });
+    };
+    formatEl.addEventListener('change', rebuildOptions);
+    audioQualityEl.addEventListener('change', rebuildOptions);
 
     selectEl.addEventListener('change', () => {
       const match = options.find(o => o.id === selectEl.value);
@@ -2016,7 +2115,7 @@ function openDownloadModal(videoObj, streamsObj, currentActiveStream, forceClien
         abortCtrl = null;
       }
       progressBox.style.display = 'none';
-      selectEl.disabled = formatEl.disabled = false;
+      selectEl.disabled = formatEl.disabled = audioQualityEl.disabled = false;
       startBtn.style.display = 'inline-flex';
       cancelBtn.style.display = 'none';
       if (selected.type === 'direct') directBtn.style.display = 'inline-flex';
@@ -2039,7 +2138,7 @@ function openDownloadModal(videoObj, streamsObj, currentActiveStream, forceClien
     };
 
     startBtn.addEventListener('click', async () => {
-      selectEl.disabled = formatEl.disabled = true;
+      selectEl.disabled = formatEl.disabled = audioQualityEl.disabled = true;
       startBtn.style.display = 'none';
       directBtn.style.display = 'none';
       cancelBtn.style.display = 'inline-block';
@@ -2154,7 +2253,7 @@ function openDownloadModal(videoObj, streamsObj, currentActiveStream, forceClien
       } catch (err) {
         if (err.name === 'AbortError') return;
         progressBox.style.display = 'none';
-        selectEl.disabled = formatEl.disabled = false;
+        selectEl.disabled = formatEl.disabled = audioQualityEl.disabled = false;
         startBtn.style.display = 'inline-flex';
         if (selected.type === 'direct') directBtn.style.display = 'inline-flex';
         cancelBtn.style.display = 'none';

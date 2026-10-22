@@ -22,10 +22,20 @@ try {
 } catch {}
 
 import fetch from 'node-fetch';
-import { MWEB, ANDROID, ANDROID_REEL, VISIONOS, ANDROID_VR, WEB, TVHTML5, TVHTML5_SIMPLY, getInnertubeApiUrl, API_URL, MOBILE_API_URL, DEFAULT_LANG, DEFAULT_COUNTRY, LANG_TO_COUNTRY } from './constants.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { MWEB, ANDROID, ANDROID_REEL, VISIONOS, ANDROID_VR, WEB, WEB_CREATOR, TVHTML5, TVHTML5_SIMPLY, getInnertubeApiUrl, API_URL, MOBILE_API_URL, DEFAULT_LANG, DEFAULT_COUNTRY, LANG_TO_COUNTRY } from './constants.js';
 import { getProxyAgent } from './proxyManager.js';
 import { getVrAuthorization, hasOAuthFile } from './androidVrAuth.js';
-import { getCookieHeader, getAuthHeader } from './cookies.js';
+import { getCookieHeader, getAuthHeader, getActiveAccount, getAccountCount, rotateAccount } from './cookies.js';
+import { getPlayerCode } from './absolutesolver/playerLoader.js';
+
+const requestStore = new AsyncLocalStorage();
+
+export function runWithRequestContext(fn) {
+  return requestStore.run({ visitorData: null, visitorPromise: null }, fn);
+}
+
+const isBotCheck = (data) => /sign in to confirm/i.test(data?.playabilityStatus?.reason || '');
 
 async function fetchWith403Retry(url, fetchArgs, maxRetries = 3) {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -51,8 +61,20 @@ class InnerTubeClient {
     this.language = options.language || DEFAULT_LANG;
     this.country = options.country || LANG_TO_COUNTRY[options.language] || DEFAULT_COUNTRY;
     this.visitorData = null;
+    this.basePlayers = new Map();
     this.initPromise = this.refreshClientVersions();
     setInterval(() => this.refreshClientVersions(), 6 * 60 * 60 * 1000).unref();
+  }
+
+  get visitorData() {
+    const store = requestStore.getStore();
+    return store ? store.visitorData : this.sharedVisitorData;
+  }
+
+  set visitorData(value) {
+    const store = requestStore.getStore();
+    if (store) store.visitorData = value;
+    else this.sharedVisitorData = value;
   }
 
   async refreshClientVersions() {
@@ -151,7 +173,7 @@ class InnerTubeClient {
     return ctx;
   }
 
-  _headers(client) {
+  _headers(client, account = null) {
     const isBrowserClient = client.clientName === 'MWEB' || client.clientName === 'WEB';
     const headers = {
       'Content-Type': 'application/json',
@@ -183,12 +205,12 @@ class InnerTubeClient {
     if (client.clientName === 'WEB' || client.clientName === 'MWEB' || client.clientName === 'TVHTML5_SIMPLY' || client.clientName === 'TVHTML5') {
       headers['X-YouTube-Client-Name'] = client.clientId;
       headers['X-YouTube-Client-Version'] = client.clientVersion;
-      const cookieHeader = getCookieHeader();
+      const cookieHeader = account ? getCookieHeader(account) : null;
       if (cookieHeader) {
         headers['Cookie'] = cookieHeader;
         if (client.clientName !== 'TVHTML5_SIMPLY') {
           const origin = headers['Origin'] || 'https://www.youtube.com';
-          const auth = getAuthHeader(origin, this.userSessionId);
+          const auth = getAuthHeader(origin, null, account);
           if (auth) {
             headers['Authorization'] = auth;
             headers['X-Origin'] = origin;
@@ -213,8 +235,23 @@ class InnerTubeClient {
     return headers;
   }
 
+  async ensureRequestVisitorData() {
+    if (requestStore.getStore() && !this.visitorData) await this.fetchVisitorData();
+  }
+
   async _post(url, body, client = MWEB, extraHeaders = {}, agent = undefined) {
-    const headers = { ...this._headers(client), ...extraHeaders };
+    await this.ensureRequestVisitorData();
+    const isPlayer = url.split('?')[0].endsWith('/player');
+    for (let attempt = 1; ; attempt++) {
+      const account = isPlayer ? getActiveAccount() : null;
+      const result = await this._postOnce(url, body, client, extraHeaders, agent, account);
+      if (!account || !isBotCheck(result) || attempt >= getAccountCount()) return result;
+      rotateAccount(account);
+    }
+  }
+
+  async _postOnce(url, body, client, extraHeaders, agent, account) {
+    const headers = { ...this._headers(client, account), ...extraHeaders };
     const fetchArgs = {
       method: 'POST',
       headers,
@@ -262,6 +299,13 @@ class InnerTubeClient {
   }
 
   async fetchVisitorData() {
+    const store = requestStore.getStore();
+    if (!store) return this.fetchVisitorData0();
+    store.visitorPromise ??= this.fetchVisitorData0();
+    return store.visitorPromise;
+  }
+
+  async fetchVisitorData0() {
     try {
       const fetchArgs = {
         headers: {
@@ -286,23 +330,23 @@ class InnerTubeClient {
   }
 }
 
-async search(query, params = null, continuation = null) {
+async search(query, params = null, continuation = null, client = WEB) {
   const body = {
-    context: this._makeContext(WEB),
+    context: this._makeContext(client),
     query,
   };
   if (params) body.params = params;
   if (continuation) body.continuation = continuation;
 
-  return this._post(`${WEB.apiUrl}search?prettyPrint=false`, body, WEB);
+  return this._post(`${client.apiUrl}search?prettyPrint=false`, body, client);
 }
 
-async searchContinuation(continuationToken) {
+async searchContinuation(continuationToken, client = WEB) {
   const body = {
-    context: this._makeContext(WEB),
+    context: this._makeContext(client),
     continuation: continuationToken,
   };
-  return this._post(`${WEB.apiUrl}search?prettyPrint=false`, body, WEB);
+  return this._post(`${client.apiUrl}search?prettyPrint=false`, body, client);
 }
 
 async liveChat(continuation, { replay = false, offsetMs = 0 } = {}) {
@@ -432,6 +476,18 @@ async mwebPlayer(videoId, options = {}) {
   return this.player(videoId, options, MWEB);
 }
 
+async mwebBasePlayer(videoId) {
+  let promise = this.basePlayers.get(videoId);
+  if (!promise) {
+    promise = getPlayerCode('mweb', MWEB.userAgent).then(({ sts }) => this.mwebPlayer(videoId, { sts }));
+    this.basePlayers.set(videoId, promise);
+    const drop = () => this.basePlayers.delete(videoId);
+    promise.catch(drop);
+    setTimeout(drop, 60_000).unref();
+  }
+  return promise;
+}
+
 async webPlayer(videoId, options = {}) {
   let raw = null;
   try {
@@ -467,22 +523,10 @@ async webPlayer(videoId, options = {}) {
 
 async fetchTvVisitorData() {
   try {
-    const origin = 'https://www.youtube.com';
     const hdrs = {
       'User-Agent': TVHTML5.userAgent,
       'Accept-Language': 'en-US,en;q=0.9'
     };
-    const cookieHeader = getCookieHeader();
-    if (cookieHeader) {
-      hdrs['Cookie'] = cookieHeader;
-      const auth = getAuthHeader(origin);
-      if (auth) {
-        hdrs['Authorization'] = auth;
-        hdrs['X-Origin'] = origin;
-        hdrs['X-Goog-AuthUser'] = '0';
-        hdrs['X-Youtube-Bootstrap-Logged-In'] = 'true';
-      }
-    }
     const fetchArgs = { headers: hdrs };
     const agent = getProxyAgent();
     if (agent) fetchArgs.agent = agent;
@@ -490,11 +534,6 @@ async fetchTvVisitorData() {
     const html = await tvPageRes.text();
     const m = html.match(/"visitorData":\s*"([^"]+)"/);
     if (m) this.visitorData = m[1];
-    const syncM = html.match(/"DATASYNC_ID":\s*"([^"]+)"/);
-    if (syncM) {
-      const parts = syncM[1].split('||');
-      this.userSessionId = parts[1] || parts[0];
-    }
     return this.visitorData || null;
   } catch {
     return null;

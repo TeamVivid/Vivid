@@ -37,6 +37,7 @@ export async function renderSearch(app, params) {
   };
   document.title = `${query} - Vivid`;
   const data = await searchVideos(query, filters);
+  if (!app.isConnected) return;
 
   if (data.error) {
     app.innerHTML = `<div class="error-msg">${escapeHtml(data.error)}</div>`;
@@ -94,8 +95,10 @@ export async function renderSearch(app, params) {
     loadMoreBtn.addEventListener('click', async () => {
       if (!continuationToken) return;
       loadMoreBtn.textContent = 'Loading...';
+      loadMoreBtn.disabled = true;
       try {
         const more = await searchVideos(query, filters, continuationToken);
+        if (!loadMoreBtn.isConnected) return;
         const list = document.getElementById('results-list');
         for (const r of (more.results || []).filter(r => showShorts || r.type !== 'shorts')) {
           list.insertAdjacentHTML('beforeend', renderResult(r, isListLayout));
@@ -105,6 +108,8 @@ export async function renderSearch(app, params) {
         else loadMoreBtn.textContent = 'Load more';
       } catch (e) {
         loadMoreBtn.textContent = 'Error, retry';
+      } finally {
+        loadMoreBtn.disabled = false;
       }
     });
   }
@@ -114,6 +119,8 @@ const SEARCH_CHIPS = [
   { label: 'All', filters: {} },
 { label: 'Shorts', filters: { type: 'shorts' } },
 { label: 'Videos', filters: { type: 'video' } },
+{ label: 'Songs', filters: { type: 'song' } },
+{ label: 'Playlists', filters: { type: 'playlist' } },
 { label: 'Recently uploaded', filters: { sort_by: 'date' } },
 { label: 'Live', filters: { features: 'live' } },
 ];
@@ -145,6 +152,7 @@ function renderFilters(query, current) {
   <select class="filter-select" name="type">
   <option value="">All</option>
   <option value="video" ${current.type === 'video' ? 'selected' : ''}>Video</option>
+  <option value="song" ${current.type === 'song' ? 'selected' : ''}>Song</option>
   <option value="channel" ${current.type === 'channel' ? 'selected' : ''}>Channel</option>
   <option value="playlist" ${current.type === 'playlist' ? 'selected' : ''}>Playlist</option>
   </select>

@@ -44,7 +44,7 @@ router.get('/', async (req, res) => {
     }
 
     if (continuation) {
-      const result = await req.extractor.searchContinuation(continuation);
+      const result = await req.extractor.searchContinuation(continuation, type === 'song', sort_by === 'date');
       return res.json(result);
     }
 

@@ -24,6 +24,8 @@ import { forceYtDlp, isYtDlpAvailable, getYtDlpInfo } from './ytdlp.js';
 const captionTracksCache = new Map();
 const vttCache = new Map();
 
+const absoluteUrl = (url) => url ? new URL(url, 'https://www.youtube.com').href : '';
+
 export function cacheCaptionTracks(videoId, captionsRenderer) {
   if (!videoId || !captionsRenderer) return;
   const result = { baseLanguages: [], translationLanguages: [], error: '', cachedAt: Date.now() };
@@ -31,7 +33,7 @@ export function cacheCaptionTracks(videoId, captionsRenderer) {
     result.baseLanguages.push({
       name: getTextFromObject(track.name) || '',
       languageCode: track.languageCode || '',
-      baseUrl: track.baseUrl || '',
+      baseUrl: absoluteUrl(track.baseUrl),
       isTranslatable: track.isTranslatable || false,
     });
   }
@@ -53,7 +55,7 @@ export function cacheCaptionTracks(videoId, captionsRenderer) {
 async function getCaptionTracksViaInnertube(client, videoId) {
   const result = { baseLanguages: [], translationLanguages: [], error: '' };
   try {
-    let data = await client.player(videoId, false);
+    let data = await client.mwebBasePlayer(videoId);
     let captions = data?.captions?.playerCaptionsTracklistRenderer;
     
     if (!captions) {
@@ -68,7 +70,7 @@ async function getCaptionTracksViaInnertube(client, videoId) {
       result.baseLanguages.push({
         name: getTextFromObject(track.name) || '',
         languageCode: track.languageCode || '',
-        baseUrl: track.baseUrl || '',
+        baseUrl: absoluteUrl(track.baseUrl),
         isTranslatable: track.isTranslatable || false,
       });
     }

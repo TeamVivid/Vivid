@@ -52,6 +52,7 @@ export async function renderPlaylist(app, params) {
   } else {
     try {
       data = await getPlaylist(listId);
+      if (!app.isConnected) return;
       document.title = data.title ? `${data.title} - Vivid` : 'Playlist - Vivid';
     } catch(e) {
       app.innerHTML = `<div class="error-msg">${escapeHtml(e.message)}</div>`;
