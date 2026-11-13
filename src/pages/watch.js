@@ -37,7 +37,7 @@ let audioSyncInterval = null;
 let stopChat = null;
 let sponsorSegments = [];
 const THEATRE_KEY = 'vivid_theatre';
-const CLIENT_ORDER = ['web', 'tv', 'tv_simply', 'mweb', 'visionos'];
+const CLIENT_ORDER = ['web', 'mweb', 'tv', 'tv_simply', 'visionos'];
 
 function clientKey(name = '') {
   const n = name.toLowerCase();
